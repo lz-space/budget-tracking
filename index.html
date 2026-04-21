@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Privacy Budget</title>
+    <link rel="stylesheet" href="styles.css">
+    <!-- Google Fonts for modern typography -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Tesseract.js for OCR -->
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <script type="module" src="app.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="top-nav">
+            <h1>Privacy Budget</h1>
+            <div class="nav-tabs">
+                <button class="tab-btn active" data-target="dashboard">Feed</button>
+                <button class="tab-btn" data-target="scanner">Scanner</button>
+                <button class="tab-btn" data-target="summary">Monthly</button>
+            </div>
+        </header>
+
+        <!-- Main Content Area -->
+        <main class="content-area">
+            
+            <!-- Dashboard / Feed View -->
+            <section id="dashboard" class="view-section active">
+                <div class="summary-card">
+                    <p class="summary-label">Total Balance</p>
+                    <h2 class="summary-amount" id="total-balance">$0.00</h2>
+                </div>
+
+                <div class="transactions-feed">
+                    <div class="feed-header">
+                        <h3>Recent Transactions</h3>
+                        <p style="font-size: 11px; color: var(--text-secondary);">Tap a transaction to edit</p>
+                    </div>
+                    <ul id="transaction-list" class="transaction-list">
+                        <!-- Transactions injected via JS -->
+                    </ul>
+                </div>
+            </section>
+
+            <!-- Scanner / Import View -->
+            <section id="scanner" class="view-section">
+                <h2>Import Data</h2>
+                <p class="helper-text">Extract transactions instantly without sending data to any servers.</p>
+                
+                <div class="import-card">
+                    <h3>Screenshot Scanner</h3>
+                    <p class="sub-text">Upload a screenshot of your bank statement.</p>
+                    <div class="file-drop-zone" id="drop-zone">
+                        <input type="file" id="file-input" accept="image/*">
+                        <p class="drop-text">Tap to select or drop image here</p>
+                    </div>
+                    <div id="ocr-status" class="status-msg hidden">Processing Image...</div>
+                </div>
+
+                <div class="import-card">
+                    <h3>Smart Paste</h3>
+                    <p class="sub-text">Paste rows from your bank's website or spreadsheet.</p>
+                    <textarea id="smart-paste-input" rows="4" placeholder="Paste transactions here..."></textarea>
+                    <button class="primary-btn mt-2" id="process-paste-btn">Parse Text</button>
+                </div>
+
+                <!-- Preview modal for imported data -->
+                <div id="import-preview-area" class="hidden">
+                    <h3>Edit & Review Transactions</h3>
+                    <p class="sub-text">You can edit names, amounts, and categories before saving.</p>
+                    <div class="preview-list" id="preview-list"></div>
+                    <div class="action-buttons mt-2">
+                        <button class="btn secondary" id="cancel-import">Cancel</button>
+                        <button class="btn primary" id="save-import">Save All</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Monthly Summary View -->
+            <section id="summary" class="view-section">
+                <h2>Monthly Overview</h2>
+                <div class="month-selector">
+                    <select id="month-select"></select>
+                </div>
+                
+                <div class="monthly-breakdown">
+                    <div class="stat-box income">
+                        <span class="stat-title">Income</span>
+                        <span class="stat-val" id="month-income">$0.00</span>
+                    </div>
+                    <div class="stat-box expense">
+                        <span class="stat-title">Expense</span>
+                        <span class="stat-val" id="month-expense">$0.00</span>
+                    </div>
+                    <div class="stat-box net">
+                        <span class="stat-title">Net</span>
+                        <span class="stat-val" id="month-net">$0.00</span>
+                    </div>
+                </div>
+
+                <h3>Spending by Category</h3>
+                <ul id="category-summary-list" class="category-list">
+                    <!-- Categories injected via JS -->
+                </ul>
+            </section>
+
+        </main>
+    </div>
+
+    <!-- Edit Modal -->
+    <div id="edit-modal" class="modal hidden">
+        <div class="modal-content">
+            <h3>Edit Transaction</h3>
+            <div class="input-group">
+                <label>Date</label>
+                <input type="date" id="edit-date" class="form-input">
+            </div>
+            <div class="input-group">
+                <label>Name / Vendor</label>
+                <input type="text" id="edit-name" class="form-input">
+            </div>
+            <div class="input-group">
+                <label>Amount ($)</label>
+                <input type="number" step="0.01" id="edit-amount" class="form-input">
+            </div>
+            <div class="input-group">
+                <label>Category</label>
+                <select id="edit-category" class="form-input">
+                    <!-- Options injected via JS -->
+                </select>
+            </div>
+            <div class="input-group">
+                <label>Type</label>
+                <select id="edit-type" class="form-input">
+                    <option value="expense">Expense</option>
+                    <option value="income">Income</option>
+                </select>
+            </div>
+            
+            <div class="action-buttons mt-2">
+                <button id="cancel-edit" class="btn secondary">Cancel</button>
+                <button id="save-edit" class="btn primary">Save</button>
+            </div>
+            <button id="delete-edit" class="btn secondary mt-2 text-danger" style="width:100%; border-color: var(--expense); color: var(--expense);">Delete Transaction</button>
+        </div>
+    </div>
+
+</body>
+</html>
