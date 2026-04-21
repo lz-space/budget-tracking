@@ -53,7 +53,7 @@ function setupScannerListeners() {
 
     fileInput.addEventListener('change', async () => {
         statusMsg.classList.remove('hidden');
-        const txs = await Scanner.processImage(fileInput, (msg) => { statusMsg.textContent = msg; });
+        const txs = await Scanner.processImages(fileInput, (msg) => { statusMsg.textContent = msg; });
         statusMsg.classList.add('hidden');
         showPreview(txs);
         fileInput.value = ''; 
