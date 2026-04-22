@@ -1,84 +1,142 @@
-import CategorizationEngine from '../services/CategorizationEngine.js';
-
-export default class Scanner {
-    
-    // Process text line by line to discover transactions
+class Scanner {
     static parseText(rawText) {
-        const lines = rawText.split('\n').filter(line => line.trim().length > 0);
+        const lines = rawText
+            .split('\n')
+            .map(line => line.trim())
+            .filter(Boolean);
+
         const transactions = [];
+        const amountRegex = /[+\-]?\$?\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})/g;
+        const dateRegex = /\b(\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?|\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}|[A-Za-z]{3,9}\s\d{1,2}(?:,\s?\d{2,4})?)\b/;
 
-        // Basic Regex setups
-        const amountRegex = /[\+\-]?\$?\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})/;
-        const dateRegex = /\b(\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?|[A-Za-z]{3}\s\d{1,2})\b/;
+        let lastSeenDate = new Date().toISOString().split('T')[0];
 
-        lines.forEach(line => {
-            const amountMatch = line.match(amountRegex);
-            
-            // If there's an amount, let's treat it as a potential transaction
-            if (amountMatch) {
-                let amountStr = amountMatch[0].replace(/[$\s,]/g, '');
-                let amount = parseFloat(amountStr);
-                
-                // Usually banks label credits vs debits, but without strict schema, we make best guess.
-                // Normally an amount without a minus is an expense in credit card statements, but let's just 
-                // categorize "payment" or negative as income, and positive as expense for standard simple logic.
-                // We'll set absolute value here, type will be expense unless we see "Payment" or "+"
-                let type = 'expense';
-                if (line.toLowerCase().includes('payment') || amountStr.includes('+') || line.includes('Deposit')) {
-                    type = 'income';
+        lines.forEach((line, index) => {
+            const dateMatch = line.match(dateRegex);
+            if (dateMatch) {
+                const normalizedDate = this.normalizeDate(dateMatch[0]);
+                if (normalizedDate) {
+                    lastSeenDate = normalizedDate;
                 }
-                amount = Math.abs(amount);
+            }
 
-                // Date logic
-                let dateMatch = line.match(dateRegex);
-                let dateStr = new Date().toISOString().split('T')[0]; // Default today
-                if (dateMatch) {
-                    // Try to parse the date safely
-                    let parsedDate = new Date(dateMatch[0]);
-                    if (!isNaN(parsedDate.getTime())) {
-                        dateStr = parsedDate.toISOString().split('T')[0];
-                    }
+            const amountMatches = [...line.matchAll(amountRegex)];
+            if (amountMatches.length === 0) return;
+
+            amountMatches.forEach(match => {
+                const amountToken = match[0];
+                const amount = Math.abs(parseFloat(amountToken.replace(/[$,\s]/g, '')));
+                if (!amount) return;
+
+                let name = line
+                    .replace(amountToken, ' ')
+                    .replace(dateRegex, ' ')
+                    .replace(/\b\d{2}:\d{2}\b/g, ' ')
+                    .replace(/[|]/g, ' ')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+
+                if (!name && index > 0 && !lines[index - 1].match(amountRegex)) {
+                    name = lines[index - 1]
+                        .replace(dateRegex, ' ')
+                        .replace(/\s+/g, ' ')
+                        .trim();
                 }
 
-                // Name is line minus amount and date
-                let name = line.replace(amountMatch[0], '').replace(dateMatch ? dateMatch[0] : '', '').trim();
-                // Clean up remaining noise
-                name = name.replace(/^[-\s|]+|[-\s|]+$/g, '').trim();
-                if (!name) name = "Unknown Vendor";
+                if (!name) {
+                    name = 'Unknown Vendor';
+                }
+
+                const categorized = CategorizationEngine.categorize(name, CategorizationEngine.guessType(name, amountToken));
 
                 transactions.push({
-                    date: dateStr,
-                    name: name,
-                    amount: amount,
-                    type: type,
-                    category: CategorizationEngine.categorize(name)
+                    date: lastSeenDate,
+                    name: this.cleanVendorName(name),
+                    amount,
+                    type: categorized.type,
+                    category: categorized.c,
+                    subCategory: categorized.s
                 });
-            }
+            });
         });
 
-        return transactions;
+        return this.dedupeTransactions(transactions);
     }
 
-    static async processImage(fileElement, statusCallback) {
-        if (!fileElement.files || fileElement.files.length === 0) return [];
-        const file = fileElement.files[0];
-        
-        statusCallback("Initializing local AI...");
-        try {
-            // Using the globally loaded Tesseract from the CDN in index.html
-            const result = await Tesseract.recognize(file, 'eng', {
-                logger: m => {
-                    if (m.status === 'recognizing text') {
-                        statusCallback(`Scanning... ${Math.round(m.progress * 100)}%`);
-                    }
-                }
-            });
-            statusCallback("Parsing results...");
-            return this.parseText(result.data.text);
-        } catch (error) {
-            console.error(error);
-            statusCallback("Error reading image. Please try again.");
-            return [];
+    static cleanVendorName(name) {
+        const cleaned = (name || '')
+            .replace(/\b(pending|posted|complete|completed)\b/gi, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+        return cleaned || 'Unknown Vendor';
+    }
+
+    static normalizeDate(input) {
+        const currentYear = new Date().getFullYear();
+        let value = input.replace(/-/g, '/').trim();
+
+        if (!/\d{4}/.test(value)) {
+            value = value.includes('/') ? `${value}/${currentYear}` : `${value}, ${currentYear}`;
         }
+
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) return null;
+
+        const month = String(parsed.getMonth() + 1).padStart(2, '0');
+        const day = String(parsed.getDate()).padStart(2, '0');
+        return `${parsed.getFullYear()}-${month}-${day}`;
+    }
+
+    static dedupeTransactions(transactions) {
+        const seen = new Set();
+        return transactions.filter(tx => {
+            const key = `${tx.date}|${tx.name.toLowerCase()}|${tx.amount.toFixed(2)}|${tx.type}`;
+            if (seen.has(key)) {
+                return false;
+            }
+            seen.add(key);
+            return true;
+        });
+    }
+
+    static async processImages(fileElement, statusCallback) {
+        if (!fileElement.files || fileElement.files.length === 0) return [];
+
+        statusCallback('Starting local OCR...');
+        let allTransactions = [];
+
+        for (let i = 0; i < fileElement.files.length; i += 1) {
+            const file = fileElement.files[i];
+            statusCallback(`Preparing image ${i + 1} of ${fileElement.files.length}...`);
+
+            try {
+                const url = URL.createObjectURL(file);
+                const img = new Image();
+
+                await new Promise((resolve, reject) => {
+                    img.onload = resolve;
+                    img.onerror = reject;
+                    img.src = url;
+                });
+
+                const result = await Tesseract.recognize(img, 'eng', {
+                    logger: message => {
+                        if (message.status === 'recognizing text') {
+                            statusCallback(`Scanning image ${i + 1}/${fileElement.files.length}... ${Math.round(message.progress * 100)}%`);
+                        }
+                    }
+                });
+
+                URL.revokeObjectURL(url);
+                allTransactions = allTransactions.concat(this.parseText(result.data.text));
+            } catch (error) {
+                console.error(error);
+                statusCallback(`Could not read image ${i + 1}.`);
+            }
+        }
+
+        return this.dedupeTransactions(allTransactions);
     }
 }
+
+window.Scanner = Scanner;

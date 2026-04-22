@@ -3,95 +3,50 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Privacy Budget</title>
+    <title>SnapLedger Local</title>
     <link rel="stylesheet" href="styles.css">
-    <!-- Google Fonts for modern typography -->
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <!-- Tesseract.js for OCR -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Patrick+Hand&family=Short+Stack&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-    <script type="module" src="app.js"></script>
+    <script src="services/CategoryService.js"></script>
+    <script src="services/StorageService.js"></script>
+    <script src="services/CategorizationEngine.js"></script>
+    <script src="components/Scanner.js"></script>
+    <script src="app.js"></script>
 </head>
 <body>
-    <div class="app-container">
-        <!-- Header -->
+    <div class="paper-app">
         <header class="top-nav">
-            <h1>Privacy Budget</h1>
+            <div>
+                <p class="eyebrow">Simple local scanner + transaction tracker</p>
+                <h1>SnapLedger Local</h1>
+            </div>
+            <p class="helper-text compact">Scan screenshots or add a transaction by hand. Everything stays local in your browser and is easy to clean up later.</p>
             <div class="nav-tabs">
-                <button class="tab-btn active" data-target="dashboard">Feed</button>
-                <button class="tab-btn" data-target="scanner">Scanner</button>
-                <button class="tab-btn" data-target="summary">Monthly</button>
+                <button class="tab-btn active" data-target="overview">Overview</button>
+                <button class="tab-btn" data-target="import">Add</button>
+                <button class="tab-btn" data-target="categories">Categories</button>
             </div>
         </header>
 
-        <!-- Main Content Area -->
         <main class="content-area">
-            
-            <!-- Dashboard / Feed View -->
-            <section id="dashboard" class="view-section active">
-                <div class="summary-card">
-                    <p class="summary-label">Total Balance</p>
-                    <h2 class="summary-amount" id="total-balance">$0.00</h2>
-                </div>
-
-                <div class="transactions-feed">
-                    <div class="feed-header">
-                        <h3>Recent Transactions</h3>
-                        <p style="font-size: 11px; color: var(--text-secondary);">Tap a transaction to edit</p>
+            <section id="overview" class="view-section active">
+                <div class="hero-card">
+                    <div>
+                        <p class="summary-label">All transactions</p>
+                        <h2 class="summary-amount" id="total-balance">$0.00</h2>
                     </div>
-                    <ul id="transaction-list" class="transaction-list">
-                        <!-- Transactions injected via JS -->
-                    </ul>
-                </div>
-            </section>
-
-            <!-- Scanner / Import View -->
-            <section id="scanner" class="view-section">
-                <h2>Import Data</h2>
-                <p class="helper-text">Extract transactions instantly without sending data to any servers.</p>
-                
-                <div class="import-card">
-                    <h3>Screenshot Scanner</h3>
-                    <p class="sub-text">Upload a screenshot of your bank statement.</p>
-                    <div class="file-drop-zone" id="drop-zone">
-                        <input type="file" id="file-input" accept="image/*">
-                        <p class="drop-text">Tap to select or drop image here</p>
-                    </div>
-                    <div id="ocr-status" class="status-msg hidden">Processing Image...</div>
+                    <p class="helper-text compact">Tap any transaction to fix the name, amount, type, category, or subcategory.</p>
                 </div>
 
-                <div class="import-card">
-                    <h3>Smart Paste</h3>
-                    <p class="sub-text">Paste rows from your bank's website or spreadsheet.</p>
-                    <textarea id="smart-paste-input" rows="4" placeholder="Paste transactions here..."></textarea>
-                    <button class="primary-btn mt-2" id="process-paste-btn">Parse Text</button>
-                </div>
-
-                <!-- Preview modal for imported data -->
-                <div id="import-preview-area" class="hidden">
-                    <h3>Edit & Review Transactions</h3>
-                    <p class="sub-text">You can edit names, amounts, and categories before saving.</p>
-                    <div class="preview-list" id="preview-list"></div>
-                    <div class="action-buttons mt-2">
-                        <button class="btn secondary" id="cancel-import">Cancel</button>
-                        <button class="btn primary" id="save-import">Save All</button>
-                    </div>
-                </div>
-            </section>
-
-            <!-- Monthly Summary View -->
-            <section id="summary" class="view-section">
-                <h2>Monthly Overview</h2>
-                <div class="month-selector">
-                    <select id="month-select"></select>
-                </div>
-                
-                <div class="monthly-breakdown">
+                <div class="stats-grid">
                     <div class="stat-box income">
                         <span class="stat-title">Income</span>
                         <span class="stat-val" id="month-income">$0.00</span>
                     </div>
                     <div class="stat-box expense">
-                        <span class="stat-title">Expense</span>
+                        <span class="stat-title">Expenses</span>
                         <span class="stat-val" id="month-expense">$0.00</span>
                     </div>
                     <div class="stat-box net">
@@ -100,52 +55,154 @@
                     </div>
                 </div>
 
-                <h3>Spending by Category</h3>
-                <ul id="category-summary-list" class="category-list">
-                    <!-- Categories injected via JS -->
-                </ul>
+                <div class="panel">
+                    <div class="panel-header">
+                        <div>
+                            <h3>Monthly summary</h3>
+                            <p class="helper-text compact">Choose a month to see where the money went.</p>
+                        </div>
+                        <select id="month-select" class="form-input month-select"></select>
+                    </div>
+                    <div class="summary-visuals">
+                        <div class="chart-card">
+                            <canvas id="monthly-pie-chart" width="280" height="280" aria-label="Monthly spending pie chart"></canvas>
+                            <p id="chart-empty-state" class="helper-text compact hidden">No expense slices yet for this month.</p>
+                        </div>
+                    </div>
+                    <ul id="category-summary-list" class="category-list"></ul>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">
+                        <div>
+                            <h3>Transactions</h3>
+                            <p class="helper-text compact">Recent first, searchable, and editable with one tap.</p>
+                        </div>
+                        <div class="transactions-tools">
+                            <input type="search" id="transaction-search" class="form-input compact-input" placeholder="Search name or category">
+                            <span id="transaction-count" class="helper-text compact count-pill">0 shown</span>
+                        </div>
+                    </div>
+                    <div class="transaction-scroll">
+                        <ul id="transaction-list" class="transaction-list"></ul>
+                    </div>
+                </div>
             </section>
 
+            <section id="import" class="view-section">
+                <div class="panel">
+                    <h2>Add transactions</h2>
+                    <p class="helper-text">Use either method below. Screenshot results can be reviewed before saving.</p>
+
+                    <div class="import-grid">
+                        <div class="import-card">
+                            <h3>Screenshot scan</h3>
+                            <p class="helper-text compact">Upload a statement or receipt screenshot.</p>
+                            <label class="file-drop-zone" id="drop-zone">
+                                <input type="file" id="file-input" accept="image/*" multiple>
+                                <span class="drop-title">Tap or drop images here</span>
+                                <span class="drop-caption">OCR runs locally on your device.</span>
+                            </label>
+                            <div id="ocr-status" class="status-msg hidden">Processing image...</div>
+                        </div>
+
+                        <div class="import-card">
+                            <h3>Manual add</h3>
+                            <p class="helper-text compact">Quickly add one transaction yourself.</p>
+                            <div class="manual-form">
+                                <input type="date" id="manual-date" class="form-input">
+                                <input type="text" id="manual-name" class="form-input" placeholder="Transaction name">
+                                <div class="inline-row">
+                                    <input type="number" step="0.01" id="manual-amount" class="form-input" placeholder="Amount">
+                                    <select id="manual-type" class="form-input">
+                                        <option value="expense">Expense</option>
+                                        <option value="income">Income</option>
+                                    </select>
+                                </div>
+                                <div class="inline-row">
+                                    <select id="manual-category" class="form-input"></select>
+                                    <select id="manual-subcat" class="form-input"></select>
+                                </div>
+                                <button class="primary-btn mt-2" id="save-manual-btn">Save transaction</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="import-preview-area" class="panel hidden">
+                    <div class="panel-header">
+                        <div>
+                            <h3>Review detected transactions</h3>
+                            <p class="helper-text compact">Adjust anything before saving.</p>
+                        </div>
+                    </div>
+                    <div class="preview-list" id="preview-list"></div>
+                    <div class="action-buttons mt-2">
+                        <button class="btn secondary" id="cancel-import">Cancel</button>
+                        <button class="btn primary" id="save-import">Save all</button>
+                    </div>
+                </div>
+            </section>
+
+            <section id="categories" class="view-section">
+                <div class="panel">
+                    <h2>Category manager</h2>
+                    <p class="helper-text">Rename, add, or delete categories and subcategories. Existing transactions will stay aligned when names change.</p>
+                    <div class="add-category-row">
+                        <input type="text" id="new-primary-cat" class="form-input" placeholder="Add a new main category">
+                        <button id="btn-add-primary" class="btn primary">Add</button>
+                    </div>
+                    <div class="category-editor" id="settings-tree-container"></div>
+                </div>
+
+                <div class="panel">
+                    <h3>Manage saved data</h3>
+                    <p class="helper-text">Everything is local. You can clear the selected month or wipe the notebook.</p>
+                    <div class="action-buttons">
+                        <button class="btn secondary" id="clear-month-data">Clear selected month</button>
+                        <button class="btn danger" id="clear-all-data">Delete all data</button>
+                    </div>
+                </div>
+            </section>
         </main>
     </div>
 
-    <!-- Edit Modal -->
     <div id="edit-modal" class="modal hidden">
         <div class="modal-content">
-            <h3>Edit Transaction</h3>
+            <h3>Edit transaction</h3>
             <div class="input-group">
-                <label>Date</label>
+                <label for="edit-date">Date</label>
                 <input type="date" id="edit-date" class="form-input">
             </div>
             <div class="input-group">
-                <label>Name / Vendor</label>
+                <label for="edit-name">Name</label>
                 <input type="text" id="edit-name" class="form-input">
             </div>
             <div class="input-group">
-                <label>Amount ($)</label>
+                <label for="edit-amount">Amount</label>
                 <input type="number" step="0.01" id="edit-amount" class="form-input">
             </div>
             <div class="input-group">
-                <label>Category</label>
-                <select id="edit-category" class="form-input">
-                    <!-- Options injected via JS -->
-                </select>
+                <label for="edit-category">Category</label>
+                <select id="edit-category" class="form-input"></select>
             </div>
             <div class="input-group">
-                <label>Type</label>
+                <label for="edit-subcat">Subcategory</label>
+                <select id="edit-subcat" class="form-input"></select>
+            </div>
+            <div class="input-group">
+                <label for="edit-type">Type</label>
                 <select id="edit-type" class="form-input">
                     <option value="expense">Expense</option>
                     <option value="income">Income</option>
                 </select>
             </div>
-            
             <div class="action-buttons mt-2">
                 <button id="cancel-edit" class="btn secondary">Cancel</button>
                 <button id="save-edit" class="btn primary">Save</button>
             </div>
-            <button id="delete-edit" class="btn secondary mt-2 text-danger" style="width:100%; border-color: var(--expense); color: var(--expense);">Delete Transaction</button>
+            <button id="delete-edit" class="btn danger">Delete transaction</button>
         </div>
     </div>
-
 </body>
 </html>

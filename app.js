@@ -1,14 +1,6 @@
-import StorageService from './services/StorageService.js';
-import Scanner from './components/Scanner.js';
-
 let pendingTransactions = [];
 let editingTransactionId = null;
-
-// Derived list of common categories 
-const CATEGORIES = [
-    'Transport', 'Food & Drink', 'Shopping', 'Groceries', 
-    'Entertainment', 'Electronics', 'Housing', 'Health', 'Other'
-];
+let currentMonthView = null;
 
 document.addEventListener('DOMContentLoaded', () => {
     initApp();
@@ -16,36 +8,42 @@ document.addEventListener('DOMContentLoaded', () => {
 
 function initApp() {
     setupTabs();
-    setupScannerListeners();
+    setupImportListeners();
     setupModalListeners();
-    renderDashboard();
-    renderMonthlySummary();
+    setupCategoryListeners();
+    setupDataManagementListeners();
+    renderAll();
 }
 
-/* UI Tabs Logic */
+function renderAll() {
+    renderOverview();
+    renderCategoryEditor();
+}
+
 function setupTabs() {
     const tabs = document.querySelectorAll('.tab-btn');
     const sections = document.querySelectorAll('.view-section');
 
     tabs.forEach(tab => {
         tab.addEventListener('click', () => {
-            tabs.forEach(t => t.classList.remove('active'));
-            sections.forEach(s => s.classList.remove('active'));
+            tabs.forEach(item => item.classList.remove('active'));
+            sections.forEach(section => section.classList.remove('active'));
+
             tab.classList.add('active');
             document.getElementById(tab.dataset.target).classList.add('active');
-            
-            if (tab.dataset.target === 'dashboard') renderDashboard();
-            if (tab.dataset.target === 'summary') renderMonthlySummary();
+
+            if (tab.dataset.target === 'overview') {
+                renderOverview();
+            }
+
+            if (tab.dataset.target === 'categories') {
+                renderCategoryEditor();
+            }
         });
     });
 }
 
-function generateCategoryOptions(selectedCat) {
-    return CATEGORIES.map(c => `<option value="${c}" ${c === selectedCat ? 'selected' : ''}>${c}</option>`).join('');
-}
-
-/* Scanner & Paste Integration */
-function setupScannerListeners() {
+function setupImportListeners() {
     const fileInput = document.getElementById('file-input');
     const statusMsg = document.getElementById('ocr-status');
     const pasteBtn = document.getElementById('process-paste-btn');
@@ -53,53 +51,66 @@ function setupScannerListeners() {
 
     fileInput.addEventListener('change', async () => {
         statusMsg.classList.remove('hidden');
-        const txs = await Scanner.processImages(fileInput, (msg) => { statusMsg.textContent = msg; });
+        const transactions = await Scanner.processImages(fileInput, message => {
+            statusMsg.textContent = message;
+        });
         statusMsg.classList.add('hidden');
-        showPreview(txs);
-        fileInput.value = ''; 
+        showPreview(transactions);
+        fileInput.value = '';
     });
 
     pasteBtn.addEventListener('click', () => {
         const text = pasteArea.value;
         if (!text.trim()) return;
-        const txs = Scanner.parseText(text);
-        showPreview(txs);
-        pasteArea.value = ''; 
+
+        const transactions = Scanner.parseText(text);
+        showPreview(transactions);
+        pasteArea.value = '';
     });
 
     document.getElementById('cancel-import').addEventListener('click', () => {
-        document.getElementById('import-preview-area').classList.add('hidden');
         pendingTransactions = [];
+        document.getElementById('import-preview-area').classList.add('hidden');
     });
 
     document.getElementById('save-import').addEventListener('click', () => {
-        // Collect edits from the UI
         const rows = document.querySelectorAll('.editable-tx-row');
-        pendingTransactions = Array.from(rows).map((row, idx) => {
-            return {
-                id: pendingTransactions[idx]?.id || Date.now() + idx,
+        const reviewedTransactions = Array.from(rows).map((row, index) => {
+            const draft = pendingTransactions[index] || {};
+            const selection = CategoryService.validateSelection(
+                row.querySelector('.tx-edit-category').value,
+                row.querySelector('.tx-edit-subcat').value
+            );
+
+            const transaction = {
+                id: draft.id,
                 date: row.querySelector('.tx-edit-date').value,
                 name: row.querySelector('.tx-edit-name').value,
                 amount: parseFloat(row.querySelector('.tx-edit-amount').value) || 0,
                 type: row.querySelector('.tx-edit-type').value,
-                category: row.querySelector('.tx-edit-category').value,
+                category: selection.category,
+                subCategory: selection.subCategory
             };
+
+            CategorizationEngine.learnMapping(transaction.name, transaction.category, transaction.subCategory);
+            return transaction;
         });
 
-        StorageService.saveMultipleTransactions(pendingTransactions);
-        document.getElementById('import-preview-area').classList.add('hidden');
+        StorageService.saveMultipleTransactions(reviewedTransactions);
         pendingTransactions = [];
-        document.querySelector('[data-target="dashboard"]').click();
+        document.getElementById('import-preview-area').classList.add('hidden');
+        document.querySelector('[data-target="overview"]').click();
     });
 }
 
-/* Edit Modal Integration */
 function setupModalListeners() {
     const modal = document.getElementById('edit-modal');
-    
-    // Setup category dropdown in modal
     const catSelect = document.getElementById('edit-category');
-    catSelect.innerHTML = generateCategoryOptions('Other');
+    const subSelect = document.getElementById('edit-subcat');
+
+    catSelect.addEventListener('change', event => {
+        populateSubcategorySelect(subSelect, event.target.value, '');
+    });
 
     document.getElementById('cancel-edit').addEventListener('click', () => {
         modal.classList.add('hidden');
@@ -108,26 +119,28 @@ function setupModalListeners() {
 
     document.getElementById('save-edit').addEventListener('click', () => {
         if (!editingTransactionId) return;
-        
-        let txs = StorageService.getTransactions();
-        const txIndex = txs.findIndex(t => t.id === editingTransactionId);
-        if (txIndex !== -1) {
-            txs[txIndex] = {
-                id: editingTransactionId,
-                date: document.getElementById('edit-date').value,
-                name: document.getElementById('edit-name').value,
-                amount: parseFloat(document.getElementById('edit-amount').value) || 0,
-                category: document.getElementById('edit-category').value,
-                type: document.getElementById('edit-type').value
-            };
-            // Replace full list
-            StorageService.clearAll();
-            txs.forEach(t => StorageService.saveTransaction(t));
-        }
-        
+
+        const selection = CategoryService.validateSelection(
+            document.getElementById('edit-category').value,
+            document.getElementById('edit-subcat').value
+        );
+
+        const updatedTransaction = {
+            id: editingTransactionId,
+            date: document.getElementById('edit-date').value,
+            name: document.getElementById('edit-name').value,
+            amount: parseFloat(document.getElementById('edit-amount').value) || 0,
+            type: document.getElementById('edit-type').value,
+            category: selection.category,
+            subCategory: selection.subCategory
+        };
+
+        StorageService.updateTransaction(updatedTransaction);
+        CategorizationEngine.learnMapping(updatedTransaction.name, updatedTransaction.category, updatedTransaction.subCategory);
+
         modal.classList.add('hidden');
         editingTransactionId = null;
-        renderDashboard();
+        renderAll();
     });
 
     document.getElementById('delete-edit').addEventListener('click', () => {
@@ -135,171 +148,452 @@ function setupModalListeners() {
         StorageService.deleteTransaction(editingTransactionId);
         modal.classList.add('hidden');
         editingTransactionId = null;
-        renderDashboard();
+        renderAll();
     });
 }
 
-function openEditModal(tx) {
-    editingTransactionId = tx.id;
-    document.getElementById('edit-date').value = tx.date;
-    document.getElementById('edit-name').value = tx.name;
-    document.getElementById('edit-amount').value = tx.amount;
-    document.getElementById('edit-category').innerHTML = generateCategoryOptions(tx.category);
-    document.getElementById('edit-type').value = tx.type;
-    
+function openEditModal(transaction) {
+    editingTransactionId = transaction.id;
+    document.getElementById('edit-date').value = transaction.date;
+    document.getElementById('edit-name').value = transaction.name;
+    document.getElementById('edit-amount').value = transaction.amount;
+    document.getElementById('edit-type').value = transaction.type;
+    populateCategorySelect(document.getElementById('edit-category'), transaction.category);
+    populateSubcategorySelect(document.getElementById('edit-subcat'), transaction.category, transaction.subCategory);
     document.getElementById('edit-modal').classList.remove('hidden');
 }
 
-
-/* Preview Scanned Items (Editable UI) */
-function showPreview(txs) {
+function showPreview(transactions) {
     const previewList = document.getElementById('preview-list');
     const previewArea = document.getElementById('import-preview-area');
-    
-    if (txs.length === 0) {
-        alert("We couldn't detect any transactions from this data. Please try again.");
+
+    if (transactions.length === 0) {
+        alert("No transactions were detected. Try a cleaner paste or another screenshot.");
         return;
     }
 
-    pendingTransactions = txs;
+    pendingTransactions = transactions;
     previewList.innerHTML = '';
-    
-    txs.forEach((tx) => {
-        const div = document.createElement('div');
-        div.className = 'editable-tx-row';
-        div.innerHTML = `
+
+    transactions.forEach(transaction => {
+        const row = document.createElement('div');
+        row.className = 'editable-tx-row';
+        row.innerHTML = `
             <div class="inline-row">
-                <input type="date" value="${tx.date}" class="form-input tx-edit-date">
-                <input type="text" value="${tx.name}" class="form-input tx-edit-name">
-            </div>
-            <div class="inline-row">
-                <input type="number" step="0.01" value="${tx.amount.toFixed(2)}" class="form-input tx-edit-amount">
+                <input type="date" value="${transaction.date}" class="form-input tx-edit-date">
                 <select class="form-input tx-edit-type">
-                    <option value="expense" ${tx.type === 'expense' ? 'selected' : ''}>Expense</option>
-                    <option value="income" ${tx.type === 'income' ? 'selected' : ''}>Income</option>
+                    <option value="expense" ${transaction.type === 'expense' ? 'selected' : ''}>Expense</option>
+                    <option value="income" ${transaction.type === 'income' ? 'selected' : ''}>Income</option>
                 </select>
             </div>
-            <select class="form-input tx-edit-category">
-                ${generateCategoryOptions(tx.category)}
-            </select>
+            <div class="inline-row">
+                <input type="text" value="${escapeHtml(transaction.name)}" class="form-input tx-edit-name">
+                <input type="number" step="0.01" value="${transaction.amount.toFixed(2)}" class="form-input tx-edit-amount">
+            </div>
+            <div class="inline-row">
+                <select class="form-input tx-edit-category"></select>
+                <select class="form-input tx-edit-subcat"></select>
+            </div>
         `;
-        previewList.appendChild(div);
+
+        const categorySelect = row.querySelector('.tx-edit-category');
+        const subcategorySelect = row.querySelector('.tx-edit-subcat');
+        populateCategorySelect(categorySelect, transaction.category);
+        populateSubcategorySelect(subcategorySelect, transaction.category, transaction.subCategory);
+
+        categorySelect.addEventListener('change', event => {
+            populateSubcategorySelect(subcategorySelect, event.target.value, '');
+        });
+
+        previewList.appendChild(row);
     });
 
     previewArea.classList.remove('hidden');
 }
 
+function renderOverview() {
+    renderDashboard();
+    renderMonthlySummary();
+}
 
-/* Dashboard Render */
 function renderDashboard() {
     const list = document.getElementById('transaction-list');
-    const balanceElem = document.getElementById('total-balance');
-    const txs = StorageService.getTransactions();
+    const balanceElement = document.getElementById('total-balance');
+    const transactions = StorageService.getTransactions();
 
     list.innerHTML = '';
-    let totalBalance = 0;
 
-    if (txs.length === 0) {
-        list.innerHTML = '<p class="sub-text" style="text-align: center;">No transactions yet. Head to Scanner to import data.</p>';
-        balanceElem.textContent = '$0.00';
+    if (transactions.length === 0) {
+        list.innerHTML = '<li class="tx-item"><div class="tx-left"><span class="tx-name">No transactions yet</span><span class="tx-date">Go to Import to add your first rows.</span></div></li>';
+        balanceElement.textContent = '$0.00';
+        balanceElement.className = 'summary-amount';
         return;
     }
 
-    txs.forEach(tx => {
-        if (tx.type === 'income') totalBalance += tx.amount;
-        else totalBalance -= tx.amount;
+    const totalBalance = transactions.reduce((sum, transaction) => {
+        return sum + (transaction.type === 'income' ? transaction.amount : -transaction.amount);
+    }, 0);
 
-        const li = document.createElement('li');
-        li.className = 'tx-item';
-        li.innerHTML = `
+    balanceElement.textContent = `${totalBalance < 0 ? '-' : ''}$${Math.abs(totalBalance).toFixed(2)}`;
+    balanceElement.className = `summary-amount ${totalBalance >= 0 ? 'positive' : 'negative'}`;
+
+    transactions.forEach(transaction => {
+        const item = document.createElement('li');
+        item.className = 'tx-item';
+        item.innerHTML = `
             <div class="tx-left">
-                <span class="tx-name">${tx.name}</span>
-                <span class="tx-date">${tx.date}</span>
-                <span class="tx-cat">${tx.category}</span>
+                <span class="tx-name">${escapeHtml(transaction.name)}</span>
+                <span class="tx-date">${transaction.date}</span>
+                <span class="tx-cat">${escapeHtml(transaction.category)} / ${escapeHtml(transaction.subCategory)}</span>
             </div>
-            <div class="tx-amount ${tx.type}">${tx.type === 'income' ? '+' : '-'}$${tx.amount.toFixed(2)}</div>
+            <div class="tx-amount ${transaction.type}">
+                ${transaction.type === 'income' ? '+' : '-'}$${transaction.amount.toFixed(2)}
+            </div>
         `;
-        
-        li.addEventListener('click', () => openEditModal(tx));
-        list.appendChild(li);
+        item.addEventListener('click', () => openEditModal(transaction));
+        list.appendChild(item);
     });
-
-    balanceElem.textContent = `$${Math.abs(totalBalance).toFixed(2)}`;
-    balanceElem.className = `summary-amount ${totalBalance >= 0 ? 'positive' : 'negative'}`;
 }
 
-/* Monthly Summary Render */
 function renderMonthlySummary() {
-    const txs = StorageService.getTransactions();
-    const select = document.getElementById('month-select');
-    
-    const months = [...new Set(txs.map(t => t.date.substring(0, 7)))].sort().reverse();
-    
+    const transactions = StorageService.getTransactions();
+    const monthSelect = document.getElementById('month-select');
+    const months = [...new Set(transactions.map(transaction => transaction.date.substring(0, 7)))].sort().reverse();
+
     if (months.length === 0) {
-        select.innerHTML = '<option>No Data Available</option>';
+        monthSelect.innerHTML = '<option>No data</option>';
         updateMonthlyBreakdown([], null);
         return;
     }
 
-    let selectedMonth = select.value;
-    select.innerHTML = '';
-    months.forEach(m => {
+    let selectedMonth = monthSelect.value;
+    monthSelect.innerHTML = '';
+
+    months.forEach(monthValue => {
         const option = document.createElement('option');
-        option.value = m;
-        
-        const [yy, mm] = m.split('-');
-        const dateObj = new Date(yy, parseInt(mm)-1);
-        option.textContent = dateObj.toLocaleString('default', { month: 'long', year: 'numeric' });
-        
-        if (m === selectedMonth) option.selected = true;
-        select.appendChild(option);
-    });
+        option.value = monthValue;
 
-    if (!months.includes(selectedMonth)) selectedMonth = months[0];
+        const [year, month] = monthValue.split('-');
+        option.textContent = new Date(Number(year), Number(month) - 1).toLocaleString('default', {
+            month: 'long',
+            year: 'numeric'
+        });
 
-    select.onchange = () => updateMonthlyBreakdown(txs, select.value);
-    updateMonthlyBreakdown(txs, selectedMonth);
-}
-
-function updateMonthlyBreakdown(txs, monthPrefix) {
-    if (!monthPrefix) return;
-    
-    const monthTxs = txs.filter(t => t.date.startsWith(monthPrefix));
-    
-    let inc = 0, exp = 0;
-    const catBuckets = {};
-
-    monthTxs.forEach(tx => {
-        if (tx.type === 'income') {
-            inc += tx.amount;
-        } else {
-            exp += tx.amount;
-            catBuckets[tx.category] = (catBuckets[tx.category] || 0) + tx.amount;
+        if (monthValue === selectedMonth) {
+            option.selected = true;
         }
+
+        monthSelect.appendChild(option);
     });
 
-    document.getElementById('month-income').textContent = `+$${inc.toFixed(2)}`;
-    document.getElementById('month-expense').textContent = `-$${exp.toFixed(2)}`;
-    const netElem = document.getElementById('month-net');
-    const net = inc - exp;
-    netElem.textContent = `${net >= 0 ? '+' : '-'}$${Math.abs(net).toFixed(2)}`;
-    netElem.style.color = net >= 0 ? 'var(--income)' : 'var(--expense)';
-
-    const catList = document.getElementById('category-summary-list');
-    catList.innerHTML = '';
-    
-    const sortedCats = Object.entries(catBuckets).sort((a,b) => b[1] - a[1]);
-    if (sortedCats.length === 0) {
-        catList.innerHTML = '<span class="sub-text">No expenses this month.</span>';
+    if (!months.includes(selectedMonth)) {
+        selectedMonth = months[0];
+        monthSelect.value = selectedMonth;
     }
 
-    sortedCats.forEach(([cat, amount]) => {
-        const li = document.createElement('li');
-        li.className = 'cat-item';
-        li.innerHTML = `
-            <span class="cat-name">${cat}</span>
-            <span class="cat-val">-$${amount.toFixed(2)}</span>
-        `;
-        catList.appendChild(li);
+    monthSelect.onchange = () => updateMonthlyBreakdown(transactions, monthSelect.value);
+    updateMonthlyBreakdown(transactions, selectedMonth);
+}
+
+function updateMonthlyBreakdown(transactions, monthPrefix) {
+    if (!monthPrefix) {
+        document.getElementById('month-income').textContent = '$0.00';
+        document.getElementById('month-expense').textContent = '$0.00';
+        document.getElementById('month-net').textContent = '$0.00';
+        document.getElementById('category-summary-list').innerHTML = '<li class="cat-item">No month selected yet.</li>';
+        return;
+    }
+
+    currentMonthView = monthPrefix;
+    const monthTransactions = transactions.filter(transaction => transaction.date.startsWith(monthPrefix));
+
+    let incomeTotal = 0;
+    let expenseTotal = 0;
+    const categoryBuckets = {};
+
+    monthTransactions.forEach(transaction => {
+        if (transaction.type === 'income') {
+            incomeTotal += transaction.amount;
+            return;
+        }
+
+        expenseTotal += transaction.amount;
+        if (!categoryBuckets[transaction.category]) {
+            categoryBuckets[transaction.category] = { total: 0, subs: {} };
+        }
+
+        categoryBuckets[transaction.category].total += transaction.amount;
+        categoryBuckets[transaction.category].subs[transaction.subCategory] =
+            (categoryBuckets[transaction.category].subs[transaction.subCategory] || 0) + transaction.amount;
     });
+
+    document.getElementById('month-income').textContent = `+$${incomeTotal.toFixed(2)}`;
+    document.getElementById('month-expense').textContent = `-$${expenseTotal.toFixed(2)}`;
+
+    const net = incomeTotal - expenseTotal;
+    const netElement = document.getElementById('month-net');
+    netElement.textContent = `${net < 0 ? '-' : '+'}$${Math.abs(net).toFixed(2)}`;
+    netElement.style.color = net >= 0 ? 'var(--income)' : 'var(--expense)';
+
+    const categoryList = document.getElementById('category-summary-list');
+    categoryList.innerHTML = '';
+
+    const sortedCategories = Object.entries(categoryBuckets).sort((left, right) => right[1].total - left[1].total);
+
+    if (sortedCategories.length === 0) {
+        categoryList.innerHTML = '<li class="cat-item">No expenses in this month.</li>';
+        return;
+    }
+
+    sortedCategories.forEach(([category, data]) => {
+        const item = document.createElement('li');
+        item.className = 'cat-item';
+
+        const subBreakdown = Object.entries(data.subs)
+            .sort((left, right) => right[1] - left[1])
+            .map(([subCategory, amount]) => `
+                <div class="sub-cat-row">
+                    <span>${escapeHtml(subCategory)}</span>
+                    <span>$${amount.toFixed(2)}</span>
+                </div>
+            `)
+            .join('');
+
+        item.innerHTML = `
+            <div class="cat-row-main">
+                <span class="cat-name">${escapeHtml(category)}</span>
+                <span class="cat-val">-$${data.total.toFixed(2)}</span>
+            </div>
+            <div class="cat-subs-list">${subBreakdown}</div>
+        `;
+
+        categoryList.appendChild(item);
+    });
+}
+
+function setupCategoryListeners() {
+    document.getElementById('btn-add-primary').addEventListener('click', () => {
+        const input = document.getElementById('new-primary-cat');
+        const value = input.value.trim();
+        if (!value) return;
+
+        CategoryService.addPrimaryCategory(value);
+        input.value = '';
+        renderCategoryEditor();
+    });
+
+    document.getElementById('settings-tree-container').addEventListener('click', event => {
+        const target = event.target;
+
+        if (target.classList.contains('rename-primary-btn')) {
+            const oldName = target.dataset.prim;
+            const input = document.getElementById(`primary-name-${cssSafe(oldName)}`);
+            const newName = input.value.trim();
+            if (!newName) return;
+
+            const renamed = CategoryService.renamePrimaryCategory(oldName, newName);
+            if (renamed) {
+                syncTransactionsAfterPrimaryRename(oldName, newName);
+                renderAll();
+            }
+        }
+
+        if (target.classList.contains('delete-primary-btn')) {
+            const category = target.dataset.prim;
+            if (confirm(`Delete "${category}"? Transactions in it will move to Other.`)) {
+                CategoryService.deletePrimaryCategory(category);
+                syncTransactionsAfterPrimaryDelete(category);
+                renderAll();
+            }
+        }
+
+        if (target.classList.contains('rename-sub-btn')) {
+            const primary = target.dataset.prim;
+            const oldSub = target.dataset.sub;
+            const input = document.getElementById(`sub-name-${cssSafe(primary)}-${cssSafe(oldSub)}`);
+            const newSub = input.value.trim();
+            if (!newSub) return;
+
+            const renamed = CategoryService.renameSubCategory(primary, oldSub, newSub);
+            if (renamed) {
+                syncTransactionsAfterSubcategoryRename(primary, oldSub, newSub);
+                renderAll();
+            }
+        }
+
+        if (target.classList.contains('delete-sub-btn')) {
+            const primary = target.dataset.prim;
+            const sub = target.dataset.sub;
+            CategoryService.deleteSubCategory(primary, sub);
+            syncTransactionsAfterSubcategoryDelete(primary, sub);
+            renderAll();
+        }
+
+        if (target.classList.contains('add-sub-btn')) {
+            const primary = target.dataset.prim;
+            const input = document.getElementById(`new-sub-${cssSafe(primary)}`);
+            const newSub = input.value.trim();
+            if (!newSub) return;
+
+            CategoryService.addSubCategory(primary, newSub);
+            input.value = '';
+            renderCategoryEditor();
+        }
+    });
+}
+
+function renderCategoryEditor() {
+    const container = document.getElementById('settings-tree-container');
+    const tree = CategoryService.getTree();
+    container.innerHTML = '';
+
+    Object.entries(tree).forEach(([primary, subcategories]) => {
+        const card = document.createElement('div');
+        card.className = 'category-card';
+
+        const subcategoryMarkup = subcategories.map(subcategory => `
+            <div class="subcat-edit-row">
+                <input
+                    type="text"
+                    id="sub-name-${cssSafe(primary)}-${cssSafe(subcategory)}"
+                    class="form-input"
+                    value="${escapeHtml(subcategory)}"
+                >
+                <button class="btn secondary mini-btn rename-sub-btn" data-prim="${escapeAttribute(primary)}" data-sub="${escapeAttribute(subcategory)}">Rename</button>
+                <button class="btn danger mini-btn delete-sub-btn" data-prim="${escapeAttribute(primary)}" data-sub="${escapeAttribute(subcategory)}">Delete</button>
+            </div>
+        `).join('');
+
+        card.innerHTML = `
+            <div class="category-card-top">
+                <div>
+                    <h3>${escapeHtml(primary)}</h3>
+                    <p class="helper-text compact">Main category</p>
+                </div>
+            </div>
+            <div class="category-name-row mt-2">
+                <input
+                    type="text"
+                    id="primary-name-${cssSafe(primary)}"
+                    class="form-input"
+                    value="${escapeHtml(primary)}"
+                >
+                <button class="btn secondary mini-btn rename-primary-btn" data-prim="${escapeAttribute(primary)}">Rename</button>
+                <button class="btn danger mini-btn delete-primary-btn" data-prim="${escapeAttribute(primary)}">Delete</button>
+            </div>
+            <div class="subcat-list">${subcategoryMarkup}</div>
+            <div class="subcat-add-row">
+                <input type="text" class="form-input" placeholder="Add subcategory" id="new-sub-${cssSafe(primary)}">
+                <button class="btn primary mini-btn add-sub-btn" data-prim="${escapeAttribute(primary)}">Add</button>
+            </div>
+        `;
+
+        container.appendChild(card);
+    });
+}
+
+function setupDataManagementListeners() {
+    document.getElementById('clear-month-data').addEventListener('click', () => {
+        if (!currentMonthView) return;
+        if (!confirm(`Delete all transactions in ${currentMonthView}?`)) return;
+
+        const filtered = StorageService.getTransactions().filter(transaction => !transaction.date.startsWith(currentMonthView));
+        StorageService.replaceTransactions(filtered);
+        renderAll();
+    });
+
+    document.getElementById('clear-all-data').addEventListener('click', () => {
+        if (!confirm('Delete every saved transaction? This cannot be undone.')) return;
+        StorageService.clearAll();
+        renderAll();
+    });
+}
+
+function syncTransactionsAfterPrimaryRename(oldName, newName) {
+    const transactions = StorageService.getTransactions().map(transaction => {
+        if (transaction.category !== oldName) return transaction;
+        const selection = CategoryService.validateSelection(newName, transaction.subCategory);
+        return {
+            ...transaction,
+            category: selection.category,
+            subCategory: selection.subCategory
+        };
+    });
+    StorageService.replaceTransactions(transactions);
+}
+
+function syncTransactionsAfterPrimaryDelete(category) {
+    const transactions = StorageService.getTransactions().map(transaction => {
+        if (transaction.category !== category) return transaction;
+        const selection = CategoryService.validateSelection('Other', 'General');
+        return {
+            ...transaction,
+            category: selection.category,
+            subCategory: selection.subCategory
+        };
+    });
+    StorageService.replaceTransactions(transactions);
+}
+
+function syncTransactionsAfterSubcategoryRename(primary, oldSub, newSub) {
+    const transactions = StorageService.getTransactions().map(transaction => {
+        if (transaction.category !== primary || transaction.subCategory !== oldSub) return transaction;
+        const selection = CategoryService.validateSelection(primary, newSub);
+        return {
+            ...transaction,
+            category: selection.category,
+            subCategory: selection.subCategory
+        };
+    });
+    StorageService.replaceTransactions(transactions);
+}
+
+function syncTransactionsAfterSubcategoryDelete(primary, subCategory) {
+    const fallbackSub = CategoryService.getFirstSubOrDefault(primary);
+    const transactions = StorageService.getTransactions().map(transaction => {
+        if (transaction.category !== primary || transaction.subCategory !== subCategory) return transaction;
+        const selection = CategoryService.validateSelection(primary, fallbackSub);
+        return {
+            ...transaction,
+            category: selection.category,
+            subCategory: selection.subCategory
+        };
+    });
+    StorageService.replaceTransactions(transactions);
+}
+
+function populateCategorySelect(selectElement, selectedCategory) {
+    const tree = CategoryService.getTree();
+    const validCategory = tree[selectedCategory] ? selectedCategory : 'Other';
+    selectElement.innerHTML = Object.keys(tree)
+        .map(category => `<option value="${escapeAttribute(category)}" ${category === validCategory ? 'selected' : ''}>${escapeHtml(category)}</option>`)
+        .join('');
+}
+
+function populateSubcategorySelect(selectElement, category, selectedSubcategory) {
+    const tree = CategoryService.getTree();
+    const validCategory = tree[category] ? category : 'Other';
+    const subcategories = tree[validCategory] || ['General'];
+    const validSub = subcategories.includes(selectedSubcategory) ? selectedSubcategory : subcategories[0];
+
+    selectElement.innerHTML = subcategories
+        .map(subcategory => `<option value="${escapeAttribute(subcategory)}" ${subcategory === validSub ? 'selected' : ''}>${escapeHtml(subcategory)}</option>`)
+        .join('');
+}
+
+function cssSafe(value) {
+    return String(value).replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+function escapeHtml(value) {
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function escapeAttribute(value) {
+    return escapeHtml(value);
 }
