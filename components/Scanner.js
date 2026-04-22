@@ -2,54 +2,69 @@ class Scanner {
     static MAX_IMAGE_DIMENSION = 1800;
     static lastOCRText = '';
     static lastError = '';
+    static NON_TRANSACTION_TERMS = [
+        'balance', 'available', 'account', 'statement', 'activity', 'ending',
+        'routing', 'member fdic', 'search', 'filter', 'deposit account',
+        'total', 'subtotal', 'summary', 'details', 'merchant', 'description',
+        'transactions', 'transaction history', 'current balance', 'posted date'
+    ];
 
     static parseText(rawText) {
-        const lines = rawText
+        const lines = this.prepareLines(rawText);
+        let transactions = this.extractTransactionsFromLines(lines);
+
+        if (transactions.length === 0) {
+            const normalizedLines = this.prepareLines(this.normalizeOCRText(rawText));
+            transactions = this.extractTransactionsFromLines(normalizedLines);
+        }
+
+        return transactions;
+    }
+
+    static prepareLines(rawText) {
+        return (rawText || '')
             .split('\n')
             .map(line => line.trim())
             .filter(Boolean);
+    }
 
+    static extractTransactionsFromLines(lines) {
         const transactions = [];
-        const amountRegex = /[+\-]?\$?\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})/g;
+        const amountRegex = /[+\-]?\$?\s*\d[\d,\s]*(?:[.]\d{1,2})?/g;
         const dateRegex = /\b(\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?|\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}|[A-Za-z]{3,9}\s\d{1,2}(?:,\s?\d{2,4})?)\b/;
-
+        const hasAnyDateHeader = lines.some(line => dateRegex.test(this.normalizeOCRText(line)));
         let lastSeenDate = new Date().toISOString().split('T')[0];
+        let hasReachedTransactionSection = !hasAnyDateHeader;
 
         lines.forEach((line, index) => {
-            const dateMatch = line.match(dateRegex);
+            const normalizedLine = this.normalizeOCRText(line);
+            const dateMatch = normalizedLine.match(dateRegex);
             if (dateMatch) {
                 const normalizedDate = this.normalizeDate(dateMatch[0]);
                 if (normalizedDate) {
                     lastSeenDate = normalizedDate;
+                    hasReachedTransactionSection = true;
                 }
             }
 
-            const amountMatches = [...line.matchAll(amountRegex)];
+            if (!hasReachedTransactionSection) return;
+
+            const amountMatches = [...normalizedLine.matchAll(amountRegex)];
             if (amountMatches.length === 0) return;
 
             amountMatches.forEach(match => {
                 const amountToken = match[0];
-                const amount = Math.abs(parseFloat(amountToken.replace(/[$,\s]/g, '')));
-                if (!amount) return;
+                if (!this.isLikelyAmountToken(amountToken)) return;
+                const amount = Math.abs(this.parseAmount(amountToken));
+                if (!amount || !this.isReasonableAmount(amount)) return;
 
-                let name = line
-                    .replace(amountToken, ' ')
-                    .replace(dateRegex, ' ')
-                    .replace(/\b\d{2}:\d{2}\b/g, ' ')
-                    .replace(/[|]/g, ' ')
-                    .replace(/\s+/g, ' ')
-                    .trim();
+                if (!this.isLikelyTransactionLine(normalizedLine, amountToken)) return;
 
-                if (!name && index > 0 && !lines[index - 1].match(amountRegex)) {
-                    name = lines[index - 1]
-                        .replace(dateRegex, ' ')
-                        .replace(/\s+/g, ' ')
-                        .trim();
-                }
+                const contextLines = this.collectContextLines(lines, index);
+                const merchantCandidate = this.extractMerchantName(contextLines, amountToken, dateRegex);
+                if (!this.isLikelyMerchantName(merchantCandidate)) return;
 
-                name = this.cleanVendorName(name);
-                if (!name) name = 'Unknown Vendor';
-
+                const name = merchantCandidate;
                 const categorized = CategorizationEngine.categorize(name, CategorizationEngine.guessType(name, amountToken));
 
                 transactions.push({
@@ -63,7 +78,131 @@ class Scanner {
             });
         });
 
-        return this.dedupeTransactions(transactions);
+        return transactions;
+    }
+
+    static collectContextLines(lines, index) {
+        const items = [];
+
+        for (let offset = -1; offset <= 1; offset += 1) {
+            const candidate = lines[index + offset];
+            if (!candidate) continue;
+            items.push({ text: candidate, offset });
+        }
+
+        return items;
+    }
+
+    static isLikelyTransactionLine(line, amountToken) {
+        const lower = (line || '').toLowerCase();
+        if (this.NON_TRANSACTION_TERMS.some(term => lower.includes(term))) {
+            return false;
+        }
+
+        const alphaCount = (line.match(/[A-Za-z]/g) || []).length;
+        const digitCount = (line.match(/\d/g) || []).length;
+        const amountCount = [...line.matchAll(/[+\-]?\$?\s*\d[\d,\s]*(?:[.]\d{1,2})?/g)].length;
+
+        if (amountCount > 2) return false;
+        if (digitCount > 18 && alphaCount < 4) return false;
+        if (String(amountToken || '').length < 4) return false;
+
+        return true;
+    }
+
+    static extractMerchantName(contextLines, amountToken, dateRegex) {
+        const candidates = [];
+
+        contextLines.forEach(item => {
+            const normalized = this.normalizeOCRText(item.text);
+            const stripped = normalized
+                .replace(new RegExp(this.escapeRegExp(amountToken), 'g'), ' ')
+                .replace(dateRegex, ' ')
+                .replace(/\b\d{2}:\d{2}\b/g, ' ')
+                .replace(/[|]/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+
+            const cleaned = this.cleanVendorName(stripped);
+            if (cleaned) {
+                candidates.push({
+                    text: cleaned,
+                    score: this.scoreMerchantCandidate(cleaned, item.offset),
+                    offset: item.offset
+                });
+            }
+        });
+
+        const currentCandidate = candidates.find(candidate => candidate.offset === 0);
+        if (currentCandidate && this.isStrongCurrentLineCandidate(currentCandidate.text)) {
+            return currentCandidate.text;
+        }
+
+        candidates.sort((left, right) => right.score - left.score);
+        return candidates[0]?.text || '';
+    }
+
+    static scoreMerchantCandidate(name, offset) {
+        const words = name.split(' ').filter(Boolean);
+        const longWords = words.filter(word => word.length >= 4).length;
+        const alphaCount = (name.match(/[A-Za-z]/g) || []).length;
+        const junkPenalty = /\b(balance|account|ending|available|details|activity|statement|total|summary)\b/i.test(name) ? 18 : 0;
+        const currentLineBonus = offset === 0 ? 18 : 0;
+        const offsetPenalty = Math.abs(offset) * 18;
+
+        return alphaCount + (longWords * 8) + currentLineBonus - junkPenalty - offsetPenalty;
+    }
+
+    static isStrongCurrentLineCandidate(name) {
+        const words = name.split(' ').filter(Boolean);
+        const alphaCount = (name.match(/[A-Za-z]/g) || []).length;
+        return alphaCount >= 6 && words.length >= 1;
+    }
+
+    static isLikelyMerchantName(name) {
+        if (!name) return false;
+
+        const lower = name.toLowerCase();
+        if (this.NON_TRANSACTION_TERMS.some(term => lower.includes(term))) {
+            return false;
+        }
+
+        const words = name.split(' ').filter(Boolean);
+        const alphaCount = (name.match(/[A-Za-z]/g) || []).length;
+        const longWords = words.filter(word => word.length >= 3).length;
+
+        if (alphaCount < 3) return false;
+        if (longWords === 0) return false;
+        if (/^\d+$/.test(name)) return false;
+
+        return true;
+    }
+
+    static normalizeOCRText(rawText) {
+        return (rawText || '')
+            .replace(/[|]/g, ' ')
+            .replace(/[Oo](?=\d{2}\b)/g, '0')
+            .replace(/(?<=\d)[oO](?=\d)/g, '0')
+            .replace(/[Ss](?=\d{2}\b)/g, '5')
+            .replace(/[,](?=\d{2}\b)/g, '.')
+            .replace(/\s{2,}/g, ' ');
+    }
+
+    static parseAmount(amountToken) {
+        const normalized = String(amountToken)
+            .replace(/[Oo]/g, '0')
+            .replace(/[$,\s]/g, '')
+            .replace(/[^0-9.+-]/g, '');
+
+        const parsed = parseFloat(normalized);
+        return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    static isLikelyAmountToken(amountToken) {
+        const raw = String(amountToken || '').trim();
+        if (!/\.\d{2}\b/.test(raw)) return false;
+        if (/^\d{1,2}:\d{2}$/.test(raw)) return false;
+        return true;
     }
 
     static cleanVendorName(name) {
@@ -71,10 +210,13 @@ class Scanner {
             .replace(/^[^A-Za-z0-9]+/g, ' ')
             .replace(/[\u25A0-\u25FF\u2600-\u27BF]/g, ' ')
             .replace(/\b(pending|posted|complete|completed)\b/gi, ' ')
-            .replace(/\b(debit|credit|purchase|payment|online|transaction|card|tap|contactless|available)\b/gi, ' ')
-            .replace(/\b(today|yesterday|details|view|merchant|statement|activity)\b/gi, ' ')
+            .replace(/\b(debit|credit|purchase|payment|online|transaction|card|tap|contactless|available|authorized)\b/gi, ' ')
+            .replace(/\b(today|yesterday|details|view|merchant|statement|activity|balance|account|ending)\b/gi, ' ')
+            .replace(/\b(total|subtotal|summary|transactions|history|search|filter)\b/gi, ' ')
+            .replace(/\b\d{2}:\d{2}\b/g, ' ')
             .replace(/^[A-Z]\s+/g, ' ')
             .replace(/^[^A-Za-z0-9]+/g, ' ')
+            .replace(/\b\d{4,}\b/g, ' ')
             .replace(/\s{2,}/g, ' ')
             .replace(/^[-:•.*]+/g, ' ')
             .replace(/\s+/g, ' ')
@@ -83,7 +225,7 @@ class Scanner {
         const tokens = cleaned.split(' ').filter(Boolean);
         const usefulTokens = tokens.filter(token => /[A-Za-z]/.test(token));
         const result = usefulTokens.length ? usefulTokens.join(' ') : cleaned;
-        return result || 'Unknown Vendor';
+        return result || '';
     }
 
     static normalizeDate(input) {
@@ -102,14 +244,12 @@ class Scanner {
         return `${parsed.getFullYear()}-${month}-${day}`;
     }
 
-    static dedupeTransactions(transactions) {
-        const seen = new Set();
-        return transactions.filter(tx => {
-            const key = `${tx.date}|${tx.name.toLowerCase()}|${tx.amount.toFixed(2)}|${tx.type}`;
-            if (seen.has(key)) return false;
-            seen.add(key);
-            return true;
-        });
+    static isReasonableAmount(amount) {
+        return amount >= 0.01 && amount <= 50000;
+    }
+
+    static escapeRegExp(value) {
+        return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
 
     static async processImages(fileElement, statusCallback) {
@@ -172,7 +312,7 @@ class Scanner {
             }
         }
 
-        return this.dedupeTransactions(allTransactions);
+        return allTransactions;
     }
 
     static isSupportedImage(file) {
@@ -250,7 +390,8 @@ class Scanner {
 
     static scoreOCRResult(text, transactions) {
         const normalizedText = (text || '').trim();
-        return (transactions.length * 1000) + normalizedText.length;
+        const namedTransactions = transactions.filter(transaction => transaction.name && transaction.name !== 'Unknown Vendor').length;
+        return (transactions.length * 1000) + (namedTransactions * 250) + normalizedText.length;
     }
 }
 

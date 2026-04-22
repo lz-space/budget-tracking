@@ -224,6 +224,23 @@ h3 {
   flex-wrap: wrap;
 }
 
+.transactions-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+#transactions-panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+#transactions-panel-body.collapsed {
+  display: none;
+}
+
 .compact-input {
   width: min(280px, 100%);
 }
@@ -395,27 +412,6 @@ input[type="date"] {
   color: var(--ink-soft);
 }
 
-.ocr-debug {
-  margin-top: 12px;
-  border: 2px dashed var(--line-light);
-  border-radius: 16px;
-  padding: 10px 12px;
-  background: #fffdf8;
-}
-
-.ocr-debug summary {
-  cursor: pointer;
-}
-
-.ocr-debug pre {
-  white-space: pre-wrap;
-  word-break: break-word;
-  margin-top: 10px;
-  max-height: 12rem;
-  overflow: auto;
-  color: var(--ink-soft);
-}
-
 .file-drop-zone {
   display: flex;
   flex-direction: column;
@@ -503,6 +499,43 @@ select:focus {
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.76), rgba(240, 215, 188, 0.28)),
     repeating-linear-gradient(0deg, transparent, transparent 22px, rgba(58, 52, 45, 0.08) 22px, rgba(58, 52, 45, 0.08) 23px);
+}
+
+.preview-row-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.preview-hints {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.duplicate-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 10px;
+  border: 2px dashed var(--line);
+  background: #fff4cf;
+  color: var(--ink);
+}
+
+.duplicate-pill.soft {
+  background: #fff4cf;
+}
+
+.duplicate-pill.strong {
+  background: #f7d8cf;
+}
+
+.preview-note {
+  margin-top: 8px;
+  color: var(--ink-soft);
 }
 
 .inline-row > * {

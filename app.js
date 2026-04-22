@@ -11,6 +11,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 function initApp() {
     setupTabs();
+    setupOverviewInteractions();
     setupImportListeners();
     setupManualEntry();
     setupModalListeners();
@@ -21,10 +22,22 @@ function initApp() {
     renderAll();
 }
 
+function setupOverviewInteractions() {
+    const toggleButton = document.getElementById('toggle-transactions');
+    const panelBody = document.getElementById('transactions-panel-body');
+
+    toggleButton.addEventListener('click', () => {
+        const isCollapsed = panelBody.classList.toggle('collapsed');
+        toggleButton.textContent = isCollapsed ? 'Expand' : 'Collapse';
+        toggleButton.setAttribute('aria-expanded', String(!isCollapsed));
+    });
+}
+
 function renderAll() {
     renderOverview();
     renderCategoryEditor();
     initializeManualForm();
+    refreshPendingPreviewCategories();
 }
 
 function setupTabs() {
@@ -40,7 +53,10 @@ function setupTabs() {
 
             if (tab.dataset.target === 'overview') renderOverview();
             if (tab.dataset.target === 'categories') renderCategoryEditor();
-            if (tab.dataset.target === 'import') initializeManualForm();
+            if (tab.dataset.target === 'import') {
+                initializeManualForm();
+                refreshPendingPreviewCategories();
+            }
         });
     });
 }
@@ -49,24 +65,15 @@ function setupImportListeners() {
     const fileInput = document.getElementById('file-input');
     const statusMsg = document.getElementById('ocr-status');
     const helpBox = document.getElementById('ocr-help');
-    const debugBox = document.getElementById('ocr-debug');
-    const debugText = document.getElementById('ocr-debug-text');
 
     fileInput.addEventListener('change', async () => {
         helpBox.classList.add('hidden');
         helpBox.textContent = '';
-        debugBox.classList.add('hidden');
-        debugText.textContent = '';
         statusMsg.classList.remove('hidden');
         const transactions = await Scanner.processImages(fileInput, message => {
             statusMsg.textContent = message;
         });
         statusMsg.classList.add('hidden');
-        const rawText = (Scanner.lastOCRText || '').trim();
-        if (rawText) {
-            debugText.textContent = rawText;
-            debugBox.classList.remove('hidden');
-        }
         if (transactions.length === 0) {
             helpBox.textContent = buildMobileScanHelp();
             helpBox.classList.remove('hidden');
@@ -82,11 +89,31 @@ function setupImportListeners() {
 
     document.getElementById('save-import').addEventListener('click', () => {
         const rows = document.querySelectorAll('.editable-tx-row');
-        const reviewedTransactions = Array.from(rows).map((row, index) => buildTransactionFromRow(row, pendingTransactions[index] || {}));
+        const reviewedTransactions = Array.from(rows).map(row => {
+            const index = Number(row.dataset.index);
+            return buildTransactionFromRow(row, pendingTransactions[index] || {});
+        });
         StorageService.saveMultipleTransactions(reviewedTransactions);
         pendingTransactions = [];
         document.getElementById('import-preview-area').classList.add('hidden');
         document.querySelector('[data-target="overview"]').click();
+    });
+
+    document.getElementById('preview-list').addEventListener('click', event => {
+        const removeButton = event.target.closest('.remove-preview-btn');
+        if (!removeButton) return;
+
+        const index = Number(removeButton.dataset.index);
+        if (Number.isNaN(index)) return;
+
+        pendingTransactions.splice(index, 1);
+
+        if (pendingTransactions.length === 0) {
+            document.getElementById('import-preview-area').classList.add('hidden');
+            return;
+        }
+
+        showPreview(pendingTransactions);
     });
 }
 
@@ -257,11 +284,20 @@ function showPreview(transactions) {
 
     pendingTransactions = transactions;
     previewList.innerHTML = '';
+    const duplicateHints = detectDuplicateWarnings(transactions);
 
-    transactions.forEach(transaction => {
+    transactions.forEach((transaction, index) => {
+        const hint = duplicateHints[index];
         const row = document.createElement('div');
         row.className = 'editable-tx-row';
+        row.dataset.index = String(index);
         row.innerHTML = `
+            <div class="preview-row-head">
+                <div class="preview-hints">
+                    ${hint ? `<span class="duplicate-pill ${hint.level}">${escapeHtml(hint.label)}</span>` : ''}
+                </div>
+                <button class="btn danger mini-btn remove-preview-btn" type="button" data-index="${index}">Remove</button>
+            </div>
             <div class="inline-row">
                 <input type="date" value="${transaction.date}" class="form-input tx-edit-date">
                 <select class="form-input tx-edit-type">
@@ -277,6 +313,7 @@ function showPreview(transactions) {
                 <select class="form-input tx-edit-category"></select>
                 <select class="form-input tx-edit-subcat"></select>
             </div>
+            ${hint ? `<p class="preview-note">${escapeHtml(hint.message)}</p>` : ''}
         `;
 
         const categorySelect = row.querySelector('.tx-edit-category');
@@ -292,6 +329,104 @@ function showPreview(transactions) {
     });
 
     previewArea.classList.remove('hidden');
+}
+
+function refreshPendingPreviewCategories() {
+    if (!pendingTransactions.length) return;
+
+    const previewArea = document.getElementById('import-preview-area');
+    if (previewArea.classList.contains('hidden')) return;
+
+    document.querySelectorAll('.editable-tx-row').forEach((row, index) => {
+        const dataIndex = Number(row.dataset.index);
+        const draft = pendingTransactions[dataIndex] || pendingTransactions[index] || {};
+        const categorySelect = row.querySelector('.tx-edit-category');
+        const subcategorySelect = row.querySelector('.tx-edit-subcat');
+        const currentCategory = categorySelect.value || draft.category;
+        const currentSubcategory = subcategorySelect.value || draft.subCategory;
+        const selection = CategoryService.validateSelection(currentCategory, currentSubcategory);
+
+        populateCategorySelect(categorySelect, selection.category);
+        populateSubcategorySelect(subcategorySelect, selection.category, selection.subCategory);
+    });
+}
+
+function detectDuplicateWarnings(transactions) {
+    const savedTransactions = StorageService.getTransactions();
+    const warnings = {};
+
+    transactions.forEach((transaction, index) => {
+        const normalizedName = normalizeDuplicateName(transaction.name);
+        const intraMatch = transactions.find((other, otherIndex) => {
+            if (index === otherIndex) return false;
+            return isPotentialDuplicate(transaction, normalizedName, other, normalizeDuplicateName(other.name));
+        });
+
+        if (intraMatch) {
+            warnings[index] = {
+                level: 'strong',
+                label: 'Possible duplicate',
+                message: `This looks very close to another scanned row: ${intraMatch.name} for $${intraMatch.amount.toFixed(2)} on ${intraMatch.date}. Remove one if they are the same purchase.`
+            };
+            return;
+        }
+
+        const savedMatch = savedTransactions.find(saved => {
+            return isPotentialDuplicate(transaction, normalizedName, saved, normalizeDuplicateName(saved.name));
+        });
+
+        if (savedMatch) {
+            warnings[index] = {
+                level: 'soft',
+                label: 'Already saved?',
+                message: `A similar saved transaction already exists: ${savedMatch.name} for $${savedMatch.amount.toFixed(2)} on ${savedMatch.date}.`
+            };
+        }
+    });
+
+    return warnings;
+}
+
+function isPotentialDuplicate(left, leftName, right, rightName) {
+    if (left.type !== right.type) return false;
+
+    const sameAmount = Math.abs((left.amount || 0) - (right.amount || 0)) < 0.01;
+    const closeDate = Math.abs(new Date(left.date).getTime() - new Date(right.date).getTime()) <= 2 * 24 * 60 * 60 * 1000;
+    const strongNameMatch = leftName && rightName && (leftName === rightName || leftName.includes(rightName) || rightName.includes(leftName));
+    const looseNameMatch = leftName && rightName && levenshteinDistance(leftName, rightName) <= 2;
+
+    return sameAmount && closeDate && (strongNameMatch || looseNameMatch);
+}
+
+function normalizeDuplicateName(name) {
+    return String(name || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .replace(/\b(inc|llc|co|corp|payment|purchase|debit|credit)\b/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function levenshteinDistance(left, right) {
+    const rows = left.length + 1;
+    const cols = right.length + 1;
+    const matrix = Array.from({ length: rows }, () => Array(cols).fill(0));
+
+    for (let i = 0; i < rows; i += 1) matrix[i][0] = i;
+    for (let j = 0; j < cols; j += 1) matrix[0][j] = j;
+
+    for (let i = 1; i < rows; i += 1) {
+        for (let j = 1; j < cols; j += 1) {
+            const cost = left[i - 1] === right[j - 1] ? 0 : 1;
+            matrix[i][j] = Math.min(
+                matrix[i - 1][j] + 1,
+                matrix[i][j - 1] + 1,
+                matrix[i - 1][j - 1] + cost
+            );
+        }
+    }
+
+    return matrix[rows - 1][cols - 1];
 }
 
 function renderOverview() {
@@ -460,8 +595,7 @@ function updateMonthlyBreakdown(transactions, monthPrefix) {
                 <span class="cat-val">-$${data.total.toFixed(2)}</span>
             </div>
             <div class="sub-cat-row">
-                <span class="category-pill"><span style="display:inline-block;width:12px;height:12px;border-radius:999px;background:${PIE_COLORS[index % PIE_COLORS.length]};border:2px solid var(--line);"></span>${escapeHtml(category)}</span>
-                <span>${((data.total / expenseTotal) * 100).toFixed(0)}%</span>
+                <span class="category-pill"><span style="display:inline-block;width:12px;height:12px;border-radius:999px;background:${PIE_COLORS[index % PIE_COLORS.length]};border:2px solid var(--line);"></span>${((data.total / expenseTotal) * 100).toFixed(0)}%</span>
             </div>
             <div class="cat-subs-list">${subBreakdown}</div>
         `;

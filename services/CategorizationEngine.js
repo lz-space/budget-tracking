@@ -38,35 +38,51 @@ class CategorizationEngine {
         return rules ? JSON.parse(rules) : {};
     }
 
+    static saveCustomRules(rules) {
+        localStorage.setItem(this.CUSTOM_RULES_KEY, JSON.stringify(rules));
+    }
+
     static normalizeName(name) {
         return (name || '')
             .toLowerCase()
             .replace(/[*#]/g, ' ')
-            .replace(/\b(pending|debit|credit|purchase|pos|card|visa|mastercard|online|transfer|ach|check|payment)\b/g, ' ')
+            .replace(/\b(pending|debit|credit|purchase|pos|card|visa|mastercard|online|transfer|ach|check|payment|posted|contactless)\b/g, ' ')
             .replace(/\d{2,}/g, ' ')
             .replace(/[^a-z\s&]/g, ' ')
             .replace(/\s+/g, ' ')
             .trim();
     }
 
-    static buildKeywordCandidates(name) {
+    static buildNameVariants(name) {
         const normalized = this.normalizeName(name);
         const words = normalized.split(' ').filter(Boolean);
-        const candidates = new Set([normalized]);
+        const variants = new Set();
+
+        if (normalized) {
+            variants.add(normalized);
+        }
+
+        if (words.length >= 1) {
+            variants.add(words[0]);
+        }
+
+        if (words.length >= 2) {
+            variants.add(words.slice(0, 2).join(' '));
+        }
+
+        if (words.length >= 3) {
+            variants.add(words.slice(0, 3).join(' '));
+        }
 
         words.forEach(word => {
-            if (word.length > 2) {
-                candidates.add(word);
+            if (word.length >= 4) {
+                variants.add(word);
             }
         });
 
-        if (words.length >= 2) {
-            candidates.add(words.slice(0, 2).join(' '));
-        }
-
         return {
             normalized,
-            candidates: [...candidates].filter(Boolean)
+            variants: [...variants].filter(variant => variant.length >= 3)
         };
     }
 
@@ -74,31 +90,49 @@ class CategorizationEngine {
         if (!name || !category || category === 'Other') return;
 
         const selection = CategoryService.validateSelection(category, subCategory);
-        const custom = this.getCustomRules();
-        const details = this.buildKeywordCandidates(name);
+        const rules = this.getCustomRules();
+        const details = this.buildNameVariants(name);
 
-        details.candidates.forEach(candidate => {
-            if (candidate.length >= 3) {
-                custom[candidate] = {
-                    category: selection.category,
-                    subCategory: selection.subCategory
-                };
-            }
+        details.variants.forEach(variant => {
+            rules[variant] = {
+                category: selection.category,
+                subCategory: selection.subCategory,
+                learnedFrom: details.normalized
+            };
         });
 
-        localStorage.setItem(this.CUSTOM_RULES_KEY, JSON.stringify(custom));
+        this.saveCustomRules(rules);
     }
 
     static guessType(name, amountText = '') {
         const normalized = this.normalizeName(name);
         const incomeHints = ['payroll', 'salary', 'deposit', 'refund', 'reversal', 'bonus', 'interest', 'cashback'];
-        if (incomeHints.some(hint => normalized.includes(hint))) {
-            return 'income';
-        }
-        if (String(amountText).trim().startsWith('+')) {
-            return 'income';
-        }
+        if (incomeHints.some(hint => normalized.includes(hint))) return 'income';
+        if (String(amountText).trim().startsWith('+')) return 'income';
         return 'expense';
+    }
+
+    static findCustomRule(name) {
+        const details = this.buildNameVariants(name);
+        const customRules = this.getCustomRules();
+        let bestMatch = null;
+
+        Object.entries(customRules).forEach(([key, mapping]) => {
+            if (!details.normalized.includes(key) && !key.includes(details.normalized)) {
+                return;
+            }
+
+            const score = key.length + (mapping.learnedFrom === details.normalized ? 40 : 0);
+            if (!bestMatch || score > bestMatch.score) {
+                bestMatch = {
+                    score,
+                    category: mapping.category,
+                    subCategory: mapping.subCategory
+                };
+            }
+        });
+
+        return bestMatch;
     }
 
     static categorize(name, preferredType = null) {
@@ -107,22 +141,8 @@ class CategorizationEngine {
             return { c: fallback.category, s: fallback.subCategory, type: preferredType || 'expense' };
         }
 
-        const details = this.buildKeywordCandidates(name);
-        let bestMatch = null;
-
-        const customRules = this.getCustomRules();
-        Object.entries(customRules).forEach(([key, mapping]) => {
-            if (details.normalized.includes(key)) {
-                const score = key.length + 100;
-                if (!bestMatch || score > bestMatch.score) {
-                    bestMatch = {
-                        score,
-                        category: mapping.category,
-                        subCategory: mapping.subCategory
-                    };
-                }
-            }
-        });
+        const details = this.buildNameVariants(name);
+        let bestMatch = this.findCustomRule(name);
 
         this.baseRules.forEach(rule => {
             rule.keywords.forEach(keyword => {

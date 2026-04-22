@@ -19,10 +19,10 @@
     <div class="paper-app">
         <header class="top-nav">
             <div>
-                <p class="eyebrow">Simple local scanner + transaction tracker</p>
+                <p class="eyebrow">Local budget tracker</p>
                 <h1>SnapLedger Local</h1>
             </div>
-            <p class="helper-text compact">Scan screenshots or add a transaction by hand. Everything stays local in your browser and is easy to clean up later.</p>
+            <p class="helper-text compact">Scan or add transactions. Everything stays local.</p>
             <div class="nav-tabs">
                 <button class="tab-btn active" data-target="overview">Overview</button>
                 <button class="tab-btn" data-target="import">Add</button>
@@ -34,10 +34,10 @@
             <section id="overview" class="view-section active">
                 <div class="hero-card">
                     <div>
-                        <p class="summary-label">All transactions</p>
+                        <p class="summary-label">Balance</p>
                         <h2 class="summary-amount" id="total-balance">$0.00</h2>
                     </div>
-                    <p class="helper-text compact">Tap any transaction to fix the name, amount, type, category, or subcategory.</p>
+                    <p class="helper-text compact">Tap a transaction to edit it.</p>
                 </div>
 
                 <div class="stats-grid">
@@ -58,15 +58,14 @@
                 <div class="panel">
                     <div class="panel-header">
                         <div>
-                            <h3>Monthly summary</h3>
-                            <p class="helper-text compact">Choose a month to see where the money went.</p>
+                            <h3>Monthly</h3>
                         </div>
                         <select id="month-select" class="form-input month-select"></select>
                     </div>
                     <div class="summary-visuals">
                         <div class="chart-card">
                             <canvas id="monthly-pie-chart" width="280" height="280" aria-label="Monthly spending pie chart"></canvas>
-                            <p id="chart-empty-state" class="helper-text compact hidden">No expense slices yet for this month.</p>
+                            <p id="chart-empty-state" class="helper-text compact hidden">No expenses yet.</p>
                         </div>
                     </div>
                     <ul id="category-summary-list" class="category-list"></ul>
@@ -76,44 +75,41 @@
                     <div class="panel-header">
                         <div>
                             <h3>Transactions</h3>
-                            <p class="helper-text compact">Recent first, searchable, and editable with one tap.</p>
                         </div>
-                        <div class="transactions-tools">
-                            <input type="search" id="transaction-search" class="form-input compact-input" placeholder="Search name or category">
+                        <div class="transactions-header-actions">
                             <span id="transaction-count" class="helper-text compact count-pill">0 shown</span>
+                            <button id="toggle-transactions" class="btn secondary mini-btn" type="button" aria-expanded="true">Collapse</button>
                         </div>
                     </div>
-                    <div class="transaction-scroll">
-                        <ul id="transaction-list" class="transaction-list"></ul>
+                    <div id="transactions-panel-body">
+                        <div class="transactions-tools">
+                            <input type="search" id="transaction-search" class="form-input compact-input" placeholder="Search name or category">
+                        </div>
+                        <div class="transaction-scroll">
+                            <ul id="transaction-list" class="transaction-list"></ul>
+                        </div>
                     </div>
                 </div>
             </section>
 
             <section id="import" class="view-section">
                 <div class="panel">
-                    <h2>Add transactions</h2>
-                    <p class="helper-text">Use either method below. Screenshot results can be reviewed before saving.</p>
+                    <h2>Add</h2>
 
                     <div class="import-grid">
                         <div class="import-card">
-                            <h3>Screenshot scan</h3>
-                            <p class="helper-text compact">Upload a statement or receipt screenshot.</p>
+                            <h3>Scan</h3>
                             <label class="file-drop-zone" id="drop-zone">
                                 <input type="file" id="file-input" accept="image/*" multiple>
                                 <span class="drop-title">Tap or drop images here</span>
-                                <span class="drop-caption">Choose from your photo library or camera. OCR runs locally on your device. On iPhone, Safari is usually the most reliable browser for scanning.</span>
+                                <span class="drop-caption">Use your library or camera. Safari works best on iPhone.</span>
                             </label>
                             <div id="ocr-status" class="status-msg hidden">Processing image...</div>
                             <div id="ocr-help" class="helper-callout hidden"></div>
-                            <details id="ocr-debug" class="ocr-debug hidden">
-                                <summary>Show OCR text</summary>
-                                <pre id="ocr-debug-text"></pre>
-                            </details>
                         </div>
 
                         <div class="import-card">
-                            <h3>Manual add</h3>
-                            <p class="helper-text compact">Quickly add one transaction yourself.</p>
+                            <h3>Manual</h3>
                             <div class="manual-form">
                                 <input type="date" id="manual-date" class="form-input date-input">
                                 <input type="text" id="manual-name" class="form-input" placeholder="Transaction name">
@@ -137,8 +133,7 @@
                 <div id="import-preview-area" class="panel hidden">
                     <div class="panel-header">
                         <div>
-                            <h3>Review detected transactions</h3>
-                            <p class="helper-text compact">Adjust anything before saving.</p>
+                            <h3>Review</h3>
                         </div>
                     </div>
                     <div class="preview-list" id="preview-list"></div>
@@ -151,8 +146,7 @@
 
             <section id="categories" class="view-section">
                 <div class="panel">
-                    <h2>Category manager</h2>
-                    <p class="helper-text">Rename, add, or delete categories and subcategories. Open only the category you want to edit.</p>
+                    <h2>Categories</h2>
                     <div class="add-category-row">
                         <input type="text" id="new-primary-cat" class="form-input" placeholder="Add a new main category">
                         <button id="btn-add-primary" class="btn primary">Add</button>
@@ -163,8 +157,7 @@
                 </div>
 
                 <div class="panel">
-                    <h3>Manage saved data</h3>
-                    <p class="helper-text">Everything is local. You can clear the selected month or wipe the notebook.</p>
+                    <h3>Data</h3>
                     <div class="action-buttons">
                         <button class="btn secondary" id="clear-month-data">Clear selected month</button>
                         <button class="btn danger" id="clear-all-data">Delete all data</button>
