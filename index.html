@@ -99,18 +99,23 @@
                             <h3>Screenshot scan</h3>
                             <p class="helper-text compact">Upload a statement or receipt screenshot.</p>
                             <label class="file-drop-zone" id="drop-zone">
-                                <input type="file" id="file-input" accept="image/*" multiple>
+                                <input type="file" id="file-input" accept="image/png,image/jpeg,image/webp" capture="environment" multiple>
                                 <span class="drop-title">Tap or drop images here</span>
-                                <span class="drop-caption">OCR runs locally on your device.</span>
+                                <span class="drop-caption">OCR runs locally on your device. On iPhone, Safari is usually the most reliable browser for scanning.</span>
                             </label>
                             <div id="ocr-status" class="status-msg hidden">Processing image...</div>
+                            <div id="ocr-help" class="helper-callout hidden"></div>
+                            <details id="ocr-debug" class="ocr-debug hidden">
+                                <summary>Show OCR text</summary>
+                                <pre id="ocr-debug-text"></pre>
+                            </details>
                         </div>
 
                         <div class="import-card">
                             <h3>Manual add</h3>
                             <p class="helper-text compact">Quickly add one transaction yourself.</p>
                             <div class="manual-form">
-                                <input type="date" id="manual-date" class="form-input">
+                                <input type="date" id="manual-date" class="form-input date-input">
                                 <input type="text" id="manual-name" class="form-input" placeholder="Transaction name">
                                 <div class="inline-row">
                                     <input type="number" step="0.01" id="manual-amount" class="form-input" placeholder="Amount">
@@ -147,12 +152,14 @@
             <section id="categories" class="view-section">
                 <div class="panel">
                     <h2>Category manager</h2>
-                    <p class="helper-text">Rename, add, or delete categories and subcategories. Existing transactions will stay aligned when names change.</p>
+                    <p class="helper-text">Rename, add, or delete categories and subcategories. Open only the category you want to edit.</p>
                     <div class="add-category-row">
                         <input type="text" id="new-primary-cat" class="form-input" placeholder="Add a new main category">
                         <button id="btn-add-primary" class="btn primary">Add</button>
                     </div>
-                    <div class="category-editor" id="settings-tree-container"></div>
+                    <div class="category-editor-scroll">
+                        <div class="category-editor" id="settings-tree-container"></div>
+                    </div>
                 </div>
 
                 <div class="panel">

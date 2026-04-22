@@ -36,6 +36,7 @@ input,
 textarea,
 select {
   font: inherit;
+  min-width: 0;
 }
 
 .paper-app {
@@ -376,6 +377,45 @@ h3 {
   gap: 10px;
 }
 
+.date-input {
+  width: 100%;
+  max-width: 100%;
+}
+
+input[type="date"] {
+  min-width: 0;
+}
+
+.helper-callout {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 2px dashed var(--line-light);
+  border-radius: 16px;
+  background: #fff7ea;
+  color: var(--ink-soft);
+}
+
+.ocr-debug {
+  margin-top: 12px;
+  border: 2px dashed var(--line-light);
+  border-radius: 16px;
+  padding: 10px 12px;
+  background: #fffdf8;
+}
+
+.ocr-debug summary {
+  cursor: pointer;
+}
+
+.ocr-debug pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-top: 10px;
+  max-height: 12rem;
+  overflow: auto;
+  color: var(--ink-soft);
+}
+
 .file-drop-zone {
   display: flex;
   flex-direction: column;
@@ -479,16 +519,37 @@ select:focus {
   margin-top: 16px;
 }
 
+.category-editor-scroll {
+  max-height: 32rem;
+  overflow: auto;
+  padding-right: 4px;
+}
+
 .category-card {
   border: 3px dashed var(--line-light);
   border-radius: 20px;
-  padding: 14px;
   background: #fffdf8;
+  overflow: hidden;
+}
+
+.category-card summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 14px;
+}
+
+.category-card summary::-webkit-details-marker {
+  display: none;
 }
 
 .category-card-top {
   justify-content: space-between;
-  align-items: flex-start;
+  align-items: center;
+}
+
+.category-card-body {
+  padding: 0 14px 14px;
+  border-top: 2px dashed var(--line-light);
 }
 
 .category-name-row,
@@ -566,5 +627,9 @@ select:focus {
 
   .transaction-scroll {
     max-height: 28rem;
+  }
+
+  .category-editor-scroll {
+    max-height: 24rem;
   }
 }

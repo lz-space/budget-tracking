@@ -48,13 +48,29 @@ function setupTabs() {
 function setupImportListeners() {
     const fileInput = document.getElementById('file-input');
     const statusMsg = document.getElementById('ocr-status');
+    const helpBox = document.getElementById('ocr-help');
+    const debugBox = document.getElementById('ocr-debug');
+    const debugText = document.getElementById('ocr-debug-text');
 
     fileInput.addEventListener('change', async () => {
+        helpBox.classList.add('hidden');
+        helpBox.textContent = '';
+        debugBox.classList.add('hidden');
+        debugText.textContent = '';
         statusMsg.classList.remove('hidden');
         const transactions = await Scanner.processImages(fileInput, message => {
             statusMsg.textContent = message;
         });
         statusMsg.classList.add('hidden');
+        const rawText = (Scanner.lastOCRText || '').trim();
+        if (rawText) {
+            debugText.textContent = rawText;
+            debugBox.classList.remove('hidden');
+        }
+        if (transactions.length === 0) {
+            helpBox.textContent = buildMobileScanHelp();
+            helpBox.classList.remove('hidden');
+        }
         showPreview(transactions);
         fileInput.value = '';
     });
@@ -587,7 +603,7 @@ function renderCategoryEditor() {
     container.innerHTML = '';
 
     Object.entries(tree).forEach(([primary, subcategories]) => {
-        const card = document.createElement('div');
+        const card = document.createElement('details');
         card.className = 'category-card';
 
         const subcategoryMarkup = subcategories.map(subcategory => `
@@ -604,31 +620,40 @@ function renderCategoryEditor() {
         `).join('');
 
         card.innerHTML = `
-            <div class="category-card-top">
-                <div>
-                    <h3>${escapeHtml(primary)}</h3>
-                    <p class="helper-text compact">Main category</p>
+            <summary>
+                <div class="category-card-top">
+                    <div>
+                        <h3>${escapeHtml(primary)}</h3>
+                        <p class="helper-text compact">${subcategories.length} subcategories</p>
+                    </div>
+                    <span class="count-pill">Edit</span>
                 </div>
-            </div>
-            <div class="category-name-row mt-2">
-                <input
-                    type="text"
-                    id="primary-name-${cssSafe(primary)}"
-                    class="form-input"
-                    value="${escapeHtml(primary)}"
-                >
-                <button class="btn secondary mini-btn rename-primary-btn" data-prim="${escapeAttribute(primary)}">Rename</button>
-                <button class="btn danger mini-btn delete-primary-btn" data-prim="${escapeAttribute(primary)}">Delete</button>
-            </div>
-            <div class="subcat-list">${subcategoryMarkup}</div>
-            <div class="subcat-add-row">
-                <input type="text" class="form-input" placeholder="Add subcategory" id="new-sub-${cssSafe(primary)}">
-                <button class="btn primary mini-btn add-sub-btn" data-prim="${escapeAttribute(primary)}">Add</button>
+            </summary>
+            <div class="category-card-body">
+                <div class="category-name-row mt-2">
+                    <input
+                        type="text"
+                        id="primary-name-${cssSafe(primary)}"
+                        class="form-input"
+                        value="${escapeHtml(primary)}"
+                    >
+                    <button class="btn secondary mini-btn rename-primary-btn" data-prim="${escapeAttribute(primary)}">Rename</button>
+                    <button class="btn danger mini-btn delete-primary-btn" data-prim="${escapeAttribute(primary)}">Delete</button>
+                </div>
+                <div class="subcat-list">${subcategoryMarkup}</div>
+                <div class="subcat-add-row">
+                    <input type="text" class="form-input" placeholder="Add subcategory" id="new-sub-${cssSafe(primary)}">
+                    <button class="btn primary mini-btn add-sub-btn" data-prim="${escapeAttribute(primary)}">Add</button>
+                </div>
             </div>
         `;
 
         container.appendChild(card);
     });
+}
+
+function buildMobileScanHelp() {
+    return 'No transactions were detected. On phones, Safari is usually the most reliable for scanning. Try a tighter screenshot, crop extra icons or top bars, and use PNG or JPG if Chrome keeps missing text.';
 }
 
 function setupDataManagementListeners() {

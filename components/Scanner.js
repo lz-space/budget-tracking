@@ -1,4 +1,8 @@
 class Scanner {
+    static MAX_IMAGE_DIMENSION = 1800;
+    static lastOCRText = '';
+    static lastError = '';
+
     static parseText(rawText) {
         const lines = rawText
             .split('\n')
@@ -116,6 +120,8 @@ class Scanner {
     static async processImages(fileElement, statusCallback) {
         if (!fileElement.files || fileElement.files.length === 0) return [];
 
+        this.lastOCRText = '';
+        this.lastError = '';
         statusCallback('Starting local OCR...');
         let allTransactions = [];
 
@@ -124,6 +130,11 @@ class Scanner {
             statusCallback(`Preparing image ${i + 1} of ${fileElement.files.length}...`);
 
             try {
+                if (!this.isSupportedImage(file)) {
+                    statusCallback(`Image ${i + 1} is not a supported format. Please use PNG, JPG, or WEBP.`);
+                    continue;
+                }
+
                 const url = URL.createObjectURL(file);
                 const img = new Image();
 
@@ -133,7 +144,8 @@ class Scanner {
                     img.src = url;
                 });
 
-                const result = await Tesseract.recognize(img, 'eng', {
+                const preparedImage = this.prepareImageForOCR(img);
+                const result = await Tesseract.recognize(preparedImage, 'eng', {
                     logger: message => {
                         if (message.status === 'recognizing text') {
                             statusCallback(`Scanning image ${i + 1}/${fileElement.files.length}... ${Math.round(message.progress * 100)}%`);
@@ -142,14 +154,52 @@ class Scanner {
                 });
 
                 URL.revokeObjectURL(url);
+                this.lastOCRText += `\n\n--- Image ${i + 1} ---\n${result.data.text || ''}`;
                 allTransactions = allTransactions.concat(this.parseText(result.data.text));
             } catch (error) {
                 console.error(error);
-                statusCallback(`Could not read image ${i + 1}.`);
+                this.lastError = `Could not read image ${i + 1}.`;
+                statusCallback(`Could not read image ${i + 1}. Try a clearer screenshot or a smaller PNG/JPG.`);
             }
         }
 
         return this.dedupeTransactions(allTransactions);
+    }
+
+    static isSupportedImage(file) {
+        const type = (file.type || '').toLowerCase();
+        return ['image/png', 'image/jpeg', 'image/webp'].includes(type);
+    }
+
+    static prepareImageForOCR(image) {
+        const width = image.naturalWidth || image.width;
+        const height = image.naturalHeight || image.height;
+        const scale = Math.min(1, this.MAX_IMAGE_DIMENSION / Math.max(width, height));
+        const targetWidth = Math.max(1, Math.round(width * scale));
+        const targetHeight = Math.max(1, Math.round(height * scale));
+
+        const canvas = document.createElement('canvas');
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+
+        const context = canvas.getContext('2d', { willReadFrequently: true });
+        context.fillStyle = '#ffffff';
+        context.fillRect(0, 0, targetWidth, targetHeight);
+        context.drawImage(image, 0, 0, targetWidth, targetHeight);
+
+        const imageData = context.getImageData(0, 0, targetWidth, targetHeight);
+        const data = imageData.data;
+
+        for (let i = 0; i < data.length; i += 4) {
+            const grayscale = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+            const boosted = grayscale > 180 ? 255 : grayscale < 110 ? 0 : grayscale;
+            data[i] = boosted;
+            data[i + 1] = boosted;
+            data[i + 2] = boosted;
+        }
+
+        context.putImageData(imageData, 0, 0);
+        return canvas;
     }
 }
 
