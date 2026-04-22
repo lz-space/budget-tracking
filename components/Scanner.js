@@ -43,6 +43,8 @@ class Scanner {
                         .trim();
                 }
 
+                name = this.cleanVendorName(name);
+
                 if (!name) {
                     name = 'Unknown Vendor';
                 }
@@ -51,7 +53,7 @@ class Scanner {
 
                 transactions.push({
                     date: lastSeenDate,
-                    name: this.cleanVendorName(name),
+                    name,
                     amount,
                     type: categorized.type,
                     category: categorized.c,
@@ -65,10 +67,22 @@ class Scanner {
 
     static cleanVendorName(name) {
         const cleaned = (name || '')
+            .replace(/^[^A-Za-z0-9]+/g, ' ')
+            .replace(/[\u25A0-\u25FF\u2600-\u27BF]/g, ' ')
             .replace(/\b(pending|posted|complete|completed)\b/gi, ' ')
+            .replace(/\b(debit|credit|purchase|payment|online|transaction|card|tap|contactless|available)\b/gi, ' ')
+            .replace(/\b(today|yesterday|details|view|merchant)\b/gi, ' ')
+            .replace(/^[A-Z]\s+/g, ' ')
+            .replace(/^[^A-Za-z0-9]+/g, ' ')
+            .replace(/\s{2,}/g, ' ')
+            .replace(/^[-:•.*]+/g, ' ')
             .replace(/\s+/g, ' ')
             .trim();
-        return cleaned || 'Unknown Vendor';
+
+        const tokens = cleaned.split(' ').filter(Boolean);
+        const usefulTokens = tokens.filter(token => /[A-Za-z]/.test(token));
+        const result = usefulTokens.length ? usefulTokens.join(' ') : cleaned;
+        return result || 'Unknown Vendor';
     }
 
     static normalizeDate(input) {

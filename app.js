@@ -1,6 +1,9 @@
 let pendingTransactions = [];
 let editingTransactionId = null;
 let currentMonthView = null;
+let transactionSearchTerm = '';
+
+const PIE_COLORS = ['#d67b44', '#2d7a53', '#5d8db8', '#b2574f', '#8c6db4', '#d1a84a', '#72825e', '#d98080'];
 
 document.addEventListener('DOMContentLoaded', () => {
     initApp();
@@ -9,15 +12,19 @@ document.addEventListener('DOMContentLoaded', () => {
 function initApp() {
     setupTabs();
     setupImportListeners();
+    setupManualEntry();
     setupModalListeners();
     setupCategoryListeners();
     setupDataManagementListeners();
+    setupTransactionSearch();
+    initializeManualForm();
     renderAll();
 }
 
 function renderAll() {
     renderOverview();
     renderCategoryEditor();
+    initializeManualForm();
 }
 
 function setupTabs() {
@@ -28,17 +35,12 @@ function setupTabs() {
         tab.addEventListener('click', () => {
             tabs.forEach(item => item.classList.remove('active'));
             sections.forEach(section => section.classList.remove('active'));
-
             tab.classList.add('active');
             document.getElementById(tab.dataset.target).classList.add('active');
 
-            if (tab.dataset.target === 'overview') {
-                renderOverview();
-            }
-
-            if (tab.dataset.target === 'categories') {
-                renderCategoryEditor();
-            }
+            if (tab.dataset.target === 'overview') renderOverview();
+            if (tab.dataset.target === 'categories') renderCategoryEditor();
+            if (tab.dataset.target === 'import') initializeManualForm();
         });
     });
 }
@@ -46,8 +48,6 @@ function setupTabs() {
 function setupImportListeners() {
     const fileInput = document.getElementById('file-input');
     const statusMsg = document.getElementById('ocr-status');
-    const pasteBtn = document.getElementById('process-paste-btn');
-    const pasteArea = document.getElementById('smart-paste-input');
 
     fileInput.addEventListener('change', async () => {
         statusMsg.classList.remove('hidden');
@@ -59,15 +59,6 @@ function setupImportListeners() {
         fileInput.value = '';
     });
 
-    pasteBtn.addEventListener('click', () => {
-        const text = pasteArea.value;
-        if (!text.trim()) return;
-
-        const transactions = Scanner.parseText(text);
-        showPreview(transactions);
-        pasteArea.value = '';
-    });
-
     document.getElementById('cancel-import').addEventListener('click', () => {
         pendingTransactions = [];
         document.getElementById('import-preview-area').classList.add('hidden');
@@ -75,31 +66,88 @@ function setupImportListeners() {
 
     document.getElementById('save-import').addEventListener('click', () => {
         const rows = document.querySelectorAll('.editable-tx-row');
-        const reviewedTransactions = Array.from(rows).map((row, index) => {
-            const draft = pendingTransactions[index] || {};
-            const selection = CategoryService.validateSelection(
-                row.querySelector('.tx-edit-category').value,
-                row.querySelector('.tx-edit-subcat').value
-            );
-
-            const transaction = {
-                id: draft.id,
-                date: row.querySelector('.tx-edit-date').value,
-                name: row.querySelector('.tx-edit-name').value,
-                amount: parseFloat(row.querySelector('.tx-edit-amount').value) || 0,
-                type: row.querySelector('.tx-edit-type').value,
-                category: selection.category,
-                subCategory: selection.subCategory
-            };
-
-            CategorizationEngine.learnMapping(transaction.name, transaction.category, transaction.subCategory);
-            return transaction;
-        });
-
+        const reviewedTransactions = Array.from(rows).map((row, index) => buildTransactionFromRow(row, pendingTransactions[index] || {}));
         StorageService.saveMultipleTransactions(reviewedTransactions);
         pendingTransactions = [];
         document.getElementById('import-preview-area').classList.add('hidden');
         document.querySelector('[data-target="overview"]').click();
+    });
+}
+
+function setupManualEntry() {
+    const manualCategory = document.getElementById('manual-category');
+    const manualSubcategory = document.getElementById('manual-subcat');
+    const manualName = document.getElementById('manual-name');
+    const manualType = document.getElementById('manual-type');
+
+    manualCategory.addEventListener('change', event => {
+        populateSubcategorySelect(manualSubcategory, event.target.value, '');
+    });
+
+    manualName.addEventListener('blur', () => {
+        const name = manualName.value.trim();
+        if (!name) return;
+
+        const guess = CategorizationEngine.categorize(name, manualType.value);
+        manualType.value = guess.type;
+        populateCategorySelect(manualCategory, guess.c);
+        populateSubcategorySelect(manualSubcategory, guess.c, guess.s);
+    });
+
+    manualType.addEventListener('change', () => {
+        const name = manualName.value.trim();
+        if (!name) return;
+        const guess = CategorizationEngine.categorize(name, manualType.value);
+        populateCategorySelect(manualCategory, guess.c);
+        populateSubcategorySelect(manualSubcategory, guess.c, guess.s);
+    });
+
+    document.getElementById('save-manual-btn').addEventListener('click', () => {
+        const selection = CategoryService.validateSelection(manualCategory.value, manualSubcategory.value);
+        const transaction = {
+            date: document.getElementById('manual-date').value,
+            name: manualName.value.trim(),
+            amount: parseFloat(document.getElementById('manual-amount').value) || 0,
+            type: manualType.value,
+            category: selection.category,
+            subCategory: selection.subCategory
+        };
+
+        if (!transaction.name || !transaction.amount) {
+            alert('Please add a name and amount before saving.');
+            return;
+        }
+
+        StorageService.saveTransaction(transaction);
+        CategorizationEngine.learnMapping(transaction.name, transaction.category, transaction.subCategory);
+        resetManualForm();
+        document.querySelector('[data-target="overview"]').click();
+    });
+}
+
+function initializeManualForm() {
+    const dateInput = document.getElementById('manual-date');
+    if (!dateInput.value) {
+        dateInput.value = new Date().toISOString().split('T')[0];
+    }
+
+    const defaultCategory = CategoryService.validateSelection('Other', 'General');
+    populateCategorySelect(document.getElementById('manual-category'), defaultCategory.category);
+    populateSubcategorySelect(document.getElementById('manual-subcat'), defaultCategory.category, defaultCategory.subCategory);
+}
+
+function resetManualForm() {
+    document.getElementById('manual-date').value = new Date().toISOString().split('T')[0];
+    document.getElementById('manual-name').value = '';
+    document.getElementById('manual-amount').value = '';
+    document.getElementById('manual-type').value = 'expense';
+    initializeManualForm();
+}
+
+function setupTransactionSearch() {
+    document.getElementById('transaction-search').addEventListener('input', event => {
+        transactionSearchTerm = event.target.value.trim().toLowerCase();
+        renderDashboard();
     });
 }
 
@@ -137,7 +185,6 @@ function setupModalListeners() {
 
         StorageService.updateTransaction(updatedTransaction);
         CategorizationEngine.learnMapping(updatedTransaction.name, updatedTransaction.category, updatedTransaction.subCategory);
-
         modal.classList.add('hidden');
         editingTransactionId = null;
         renderAll();
@@ -163,12 +210,32 @@ function openEditModal(transaction) {
     document.getElementById('edit-modal').classList.remove('hidden');
 }
 
+function buildTransactionFromRow(row, draft) {
+    const selection = CategoryService.validateSelection(
+        row.querySelector('.tx-edit-category').value,
+        row.querySelector('.tx-edit-subcat').value
+    );
+
+    const transaction = {
+        id: draft.id,
+        date: row.querySelector('.tx-edit-date').value,
+        name: row.querySelector('.tx-edit-name').value,
+        amount: parseFloat(row.querySelector('.tx-edit-amount').value) || 0,
+        type: row.querySelector('.tx-edit-type').value,
+        category: selection.category,
+        subCategory: selection.subCategory
+    };
+
+    CategorizationEngine.learnMapping(transaction.name, transaction.category, transaction.subCategory);
+    return transaction;
+}
+
 function showPreview(transactions) {
     const previewList = document.getElementById('preview-list');
     const previewArea = document.getElementById('import-preview-area');
 
     if (transactions.length === 0) {
-        alert("No transactions were detected. Try a cleaner paste or another screenshot.");
+        alert('No transactions were detected. Try a cleaner screenshot.');
         return;
     }
 
@@ -219,16 +286,10 @@ function renderOverview() {
 function renderDashboard() {
     const list = document.getElementById('transaction-list');
     const balanceElement = document.getElementById('total-balance');
+    const countElement = document.getElementById('transaction-count');
     const transactions = StorageService.getTransactions();
 
     list.innerHTML = '';
-
-    if (transactions.length === 0) {
-        list.innerHTML = '<li class="tx-item"><div class="tx-left"><span class="tx-name">No transactions yet</span><span class="tx-date">Go to Import to add your first rows.</span></div></li>';
-        balanceElement.textContent = '$0.00';
-        balanceElement.className = 'summary-amount';
-        return;
-    }
 
     const totalBalance = transactions.reduce((sum, transaction) => {
         return sum + (transaction.type === 'income' ? transaction.amount : -transaction.amount);
@@ -237,7 +298,24 @@ function renderDashboard() {
     balanceElement.textContent = `${totalBalance < 0 ? '-' : ''}$${Math.abs(totalBalance).toFixed(2)}`;
     balanceElement.className = `summary-amount ${totalBalance >= 0 ? 'positive' : 'negative'}`;
 
-    transactions.forEach(transaction => {
+    const filteredTransactions = transactions.filter(transaction => {
+        if (!transactionSearchTerm) return true;
+        const haystack = `${transaction.name} ${transaction.category} ${transaction.subCategory}`.toLowerCase();
+        return haystack.includes(transactionSearchTerm);
+    });
+
+    countElement.textContent = `${filteredTransactions.length} shown`;
+
+    if (filteredTransactions.length === 0) {
+        list.innerHTML = `<li class="tx-item"><div class="tx-left"><span class="tx-name">${transactions.length ? 'No matches' : 'No transactions yet'}</span><span class="tx-date">${transactions.length ? 'Try a different search.' : 'Go to Add to scan or enter your first transaction.'}</span></div></li>`;
+        if (!transactions.length) {
+            balanceElement.textContent = '$0.00';
+            balanceElement.className = 'summary-amount';
+        }
+        return;
+    }
+
+    filteredTransactions.forEach(transaction => {
         const item = document.createElement('li');
         item.className = 'tx-item';
         item.innerHTML = `
@@ -272,17 +350,12 @@ function renderMonthlySummary() {
     months.forEach(monthValue => {
         const option = document.createElement('option');
         option.value = monthValue;
-
         const [year, month] = monthValue.split('-');
         option.textContent = new Date(Number(year), Number(month) - 1).toLocaleString('default', {
             month: 'long',
             year: 'numeric'
         });
-
-        if (monthValue === selectedMonth) {
-            option.selected = true;
-        }
-
+        if (monthValue === selectedMonth) option.selected = true;
         monthSelect.appendChild(option);
     });
 
@@ -296,17 +369,19 @@ function renderMonthlySummary() {
 }
 
 function updateMonthlyBreakdown(transactions, monthPrefix) {
+    const categoryList = document.getElementById('category-summary-list');
+
     if (!monthPrefix) {
         document.getElementById('month-income').textContent = '$0.00';
         document.getElementById('month-expense').textContent = '$0.00';
         document.getElementById('month-net').textContent = '$0.00';
-        document.getElementById('category-summary-list').innerHTML = '<li class="cat-item">No month selected yet.</li>';
+        categoryList.innerHTML = '<li class="cat-item">No month selected yet.</li>';
+        drawMonthlyPieChart([]);
         return;
     }
 
     currentMonthView = monthPrefix;
     const monthTransactions = transactions.filter(transaction => transaction.date.startsWith(monthPrefix));
-
     let incomeTotal = 0;
     let expenseTotal = 0;
     const categoryBuckets = {};
@@ -321,7 +396,6 @@ function updateMonthlyBreakdown(transactions, monthPrefix) {
         if (!categoryBuckets[transaction.category]) {
             categoryBuckets[transaction.category] = { total: 0, subs: {} };
         }
-
         categoryBuckets[transaction.category].total += transaction.amount;
         categoryBuckets[transaction.category].subs[transaction.subCategory] =
             (categoryBuckets[transaction.category].subs[transaction.subCategory] || 0) + transaction.amount;
@@ -335,17 +409,22 @@ function updateMonthlyBreakdown(transactions, monthPrefix) {
     netElement.textContent = `${net < 0 ? '-' : '+'}$${Math.abs(net).toFixed(2)}`;
     netElement.style.color = net >= 0 ? 'var(--income)' : 'var(--expense)';
 
-    const categoryList = document.getElementById('category-summary-list');
-    categoryList.innerHTML = '';
-
     const sortedCategories = Object.entries(categoryBuckets).sort((left, right) => right[1].total - left[1].total);
+    categoryList.innerHTML = '';
 
     if (sortedCategories.length === 0) {
         categoryList.innerHTML = '<li class="cat-item">No expenses in this month.</li>';
+        drawMonthlyPieChart([]);
         return;
     }
 
-    sortedCategories.forEach(([category, data]) => {
+    drawMonthlyPieChart(sortedCategories.map(([category, data], index) => ({
+        label: category,
+        value: data.total,
+        color: PIE_COLORS[index % PIE_COLORS.length]
+    })));
+
+    sortedCategories.forEach(([category, data], index) => {
         const item = document.createElement('li');
         item.className = 'cat-item';
 
@@ -364,11 +443,70 @@ function updateMonthlyBreakdown(transactions, monthPrefix) {
                 <span class="cat-name">${escapeHtml(category)}</span>
                 <span class="cat-val">-$${data.total.toFixed(2)}</span>
             </div>
+            <div class="sub-cat-row">
+                <span class="category-pill"><span style="display:inline-block;width:12px;height:12px;border-radius:999px;background:${PIE_COLORS[index % PIE_COLORS.length]};border:2px solid var(--line);"></span>${escapeHtml(category)}</span>
+                <span>${((data.total / expenseTotal) * 100).toFixed(0)}%</span>
+            </div>
             <div class="cat-subs-list">${subBreakdown}</div>
         `;
 
         categoryList.appendChild(item);
     });
+}
+
+function drawMonthlyPieChart(slices) {
+    const canvas = document.getElementById('monthly-pie-chart');
+    const emptyState = document.getElementById('chart-empty-state');
+    const context = canvas.getContext('2d');
+    const width = canvas.width;
+    const height = canvas.height;
+    const centerX = width / 2;
+    const centerY = height / 2;
+    const radius = 92;
+
+    context.clearRect(0, 0, width, height);
+    context.fillStyle = '#fffdf8';
+    context.strokeStyle = '#3a342d';
+    context.lineWidth = 3;
+    context.beginPath();
+    context.arc(centerX, centerY, radius + 18, 0, Math.PI * 2);
+    context.fill();
+    context.stroke();
+
+    if (!slices.length) {
+        emptyState.classList.remove('hidden');
+        context.fillStyle = '#5f584d';
+        context.font = '20px "Patrick Hand"';
+        context.textAlign = 'center';
+        context.fillText('No expenses', centerX, centerY);
+        return;
+    }
+
+    emptyState.classList.add('hidden');
+    const total = slices.reduce((sum, slice) => sum + slice.value, 0);
+    let startAngle = -Math.PI / 2;
+
+    slices.forEach(slice => {
+        const sliceAngle = (slice.value / total) * Math.PI * 2;
+        context.beginPath();
+        context.moveTo(centerX, centerY);
+        context.arc(centerX, centerY, radius, startAngle, startAngle + sliceAngle);
+        context.closePath();
+        context.fillStyle = slice.color;
+        context.fill();
+        context.stroke();
+        startAngle += sliceAngle;
+    });
+
+    context.beginPath();
+    context.fillStyle = '#fffaf2';
+    context.arc(centerX, centerY, 36, 0, Math.PI * 2);
+    context.fill();
+    context.stroke();
+    context.fillStyle = '#22201b';
+    context.font = '18px "Short Stack"';
+    context.textAlign = 'center';
+    context.fillText('Spend', centerX, centerY + 6);
 }
 
 function setupCategoryListeners() {
@@ -380,6 +518,7 @@ function setupCategoryListeners() {
         CategoryService.addPrimaryCategory(value);
         input.value = '';
         renderCategoryEditor();
+        initializeManualForm();
     });
 
     document.getElementById('settings-tree-container').addEventListener('click', event => {
@@ -437,7 +576,7 @@ function setupCategoryListeners() {
 
             CategoryService.addSubCategory(primary, newSub);
             input.value = '';
-            renderCategoryEditor();
+            renderAll();
         }
     });
 }
@@ -496,7 +635,6 @@ function setupDataManagementListeners() {
     document.getElementById('clear-month-data').addEventListener('click', () => {
         if (!currentMonthView) return;
         if (!confirm(`Delete all transactions in ${currentMonthView}?`)) return;
-
         const filtered = StorageService.getTransactions().filter(transaction => !transaction.date.startsWith(currentMonthView));
         StorageService.replaceTransactions(filtered);
         renderAll();
@@ -513,11 +651,7 @@ function syncTransactionsAfterPrimaryRename(oldName, newName) {
     const transactions = StorageService.getTransactions().map(transaction => {
         if (transaction.category !== oldName) return transaction;
         const selection = CategoryService.validateSelection(newName, transaction.subCategory);
-        return {
-            ...transaction,
-            category: selection.category,
-            subCategory: selection.subCategory
-        };
+        return { ...transaction, category: selection.category, subCategory: selection.subCategory };
     });
     StorageService.replaceTransactions(transactions);
 }
@@ -526,11 +660,7 @@ function syncTransactionsAfterPrimaryDelete(category) {
     const transactions = StorageService.getTransactions().map(transaction => {
         if (transaction.category !== category) return transaction;
         const selection = CategoryService.validateSelection('Other', 'General');
-        return {
-            ...transaction,
-            category: selection.category,
-            subCategory: selection.subCategory
-        };
+        return { ...transaction, category: selection.category, subCategory: selection.subCategory };
     });
     StorageService.replaceTransactions(transactions);
 }
@@ -539,11 +669,7 @@ function syncTransactionsAfterSubcategoryRename(primary, oldSub, newSub) {
     const transactions = StorageService.getTransactions().map(transaction => {
         if (transaction.category !== primary || transaction.subCategory !== oldSub) return transaction;
         const selection = CategoryService.validateSelection(primary, newSub);
-        return {
-            ...transaction,
-            category: selection.category,
-            subCategory: selection.subCategory
-        };
+        return { ...transaction, category: selection.category, subCategory: selection.subCategory };
     });
     StorageService.replaceTransactions(transactions);
 }
@@ -553,11 +679,7 @@ function syncTransactionsAfterSubcategoryDelete(primary, subCategory) {
     const transactions = StorageService.getTransactions().map(transaction => {
         if (transaction.category !== primary || transaction.subCategory !== subCategory) return transaction;
         const selection = CategoryService.validateSelection(primary, fallbackSub);
-        return {
-            ...transaction,
-            category: selection.category,
-            subCategory: selection.subCategory
-        };
+        return { ...transaction, category: selection.category, subCategory: selection.subCategory };
     });
     StorageService.replaceTransactions(transactions);
 }
