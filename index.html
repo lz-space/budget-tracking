@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Spendlet</title>
-    <link rel="stylesheet" href="styles.css?v=3">
+    <link rel="stylesheet" href="styles.css?v=4">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Patrick+Hand&family=Short+Stack&display=swap" rel="stylesheet">
@@ -19,7 +19,7 @@
     <script src="services/StorageService.js?v=5"></script>
     <script src="services/CategorizationEngine.js?v=4"></script>
     <script src="components/Scanner.js?v=14"></script>
-    <script src="app.js?v=10"></script>
+    <script src="app.js?v=11"></script>
 </head>
 <body>
     <div class="paper-app">
@@ -61,21 +61,26 @@
                     </div>
                 </div>
 
-                <div class="panel">
+                <div class="panel" id="monthly-panel">
                     <div class="panel-header">
                         <div>
                             <h3>Monthly</h3>
                             <p class="helper-text compact">Pie and cards show this month by category.</p>
                         </div>
-                        <select id="month-select" class="form-input month-select"></select>
-                    </div>
-                    <div class="summary-visuals">
-                        <div class="chart-card">
-                            <canvas id="monthly-pie-chart" width="280" height="280" aria-label="Monthly spending pie chart"></canvas>
-                            <p id="chart-empty-state" class="helper-text compact hidden">No expenses yet.</p>
+                        <div class="transactions-header-actions">
+                            <select id="month-select" class="form-input month-select"></select>
+                            <button id="toggle-monthly-summary" class="btn secondary mini-btn" type="button" aria-expanded="true">Collapse</button>
                         </div>
                     </div>
-                    <ul id="category-summary-list" class="category-list"></ul>
+                    <div id="monthly-summary-body">
+                        <div class="summary-visuals">
+                            <div class="chart-card">
+                                <canvas id="monthly-pie-chart" width="280" height="280" aria-label="Monthly spending pie chart"></canvas>
+                                <p id="chart-empty-state" class="helper-text compact hidden">No expenses yet.</p>
+                            </div>
+                        </div>
+                        <ul id="category-summary-list" class="category-list"></ul>
+                    </div>
                 </div>
 
                 <div class="panel" id="transactions-panel">

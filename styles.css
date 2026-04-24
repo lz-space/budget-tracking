@@ -251,13 +251,15 @@ h3 {
   flex-wrap: wrap;
 }
 
-#transactions-panel-body {
+#transactions-panel-body,
+#monthly-summary-body {
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
 
-#transactions-panel-body.collapsed {
+#transactions-panel-body.collapsed,
+#monthly-summary-body.collapsed {
   display: none;
 }
 

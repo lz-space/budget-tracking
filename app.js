@@ -28,6 +28,8 @@ function initApp() {
 function setupOverviewInteractions() {
     const toggleButton = document.getElementById('toggle-transactions');
     const panelBody = document.getElementById('transactions-panel-body');
+    const monthlyToggleButton = document.getElementById('toggle-monthly-summary');
+    const monthlyPanelBody = document.getElementById('monthly-summary-body');
     const categoryList = document.getElementById('category-summary-list');
     const clearFilterButton = document.getElementById('clear-transaction-filter');
 
@@ -35,6 +37,12 @@ function setupOverviewInteractions() {
         const isCollapsed = panelBody.classList.toggle('collapsed');
         toggleButton.textContent = isCollapsed ? 'Expand' : 'Collapse';
         toggleButton.setAttribute('aria-expanded', String(!isCollapsed));
+    });
+
+    monthlyToggleButton.addEventListener('click', () => {
+        const isCollapsed = monthlyPanelBody.classList.toggle('collapsed');
+        monthlyToggleButton.textContent = isCollapsed ? 'Expand' : 'Collapse';
+        monthlyToggleButton.setAttribute('aria-expanded', String(!isCollapsed));
     });
 
     categoryList.addEventListener('click', event => {
