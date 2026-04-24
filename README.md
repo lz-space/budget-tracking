@@ -1,4 +1,4 @@
-# Privacy Budget App
+# Spendlet
 
 A fully local, privacy-first budgeting app designed to run entirely within your browser.
 

@@ -266,6 +266,12 @@ h3 {
   gap: 12px;
 }
 
+.category-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+}
+
 .transaction-scroll {
   max-height: 34rem;
   overflow: auto;
@@ -326,13 +332,13 @@ h3 {
 }
 
 .cat-item {
-  padding: 14px 16px;
+  padding: 10px 12px;
   border: 3px dashed var(--line-light);
-  border-radius: 18px;
+  border-radius: 16px;
   background: #fffdf8;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 7px;
 }
 
 .cat-row-main,
@@ -351,11 +357,49 @@ h3 {
   justify-content: space-between;
 }
 
+.cat-row-main {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.cat-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cat-val {
+  white-space: nowrap;
+}
+
 .cat-subs-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px 8px;
   color: var(--ink-soft);
+}
+
+.sub-cat-chip {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(239, 228, 202, 0.45);
+}
+
+.sub-cat-chip span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sub-cat-chip span:last-child {
+  white-space: nowrap;
 }
 
 .summary-visuals {
@@ -635,6 +679,11 @@ select:focus {
 @media (max-width: 760px) {
   .stats-grid,
   .import-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .category-list,
+  .cat-subs-list {
     grid-template-columns: 1fr;
   }
 

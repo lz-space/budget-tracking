@@ -622,7 +622,7 @@ function updateMonthlyBreakdown(transactions, monthPrefix) {
         const subBreakdown = Object.entries(data.subs)
             .sort((left, right) => right[1] - left[1])
             .map(([subCategory, amount]) => `
-                <div class="sub-cat-row">
+                <div class="sub-cat-chip">
                     <span>${escapeHtml(subCategory)}</span>
                     <span>$${amount.toFixed(2)}</span>
                 </div>
@@ -631,11 +631,9 @@ function updateMonthlyBreakdown(transactions, monthPrefix) {
 
         item.innerHTML = `
             <div class="cat-row-main">
+                <span class="category-pill"><span style="display:inline-block;width:12px;height:12px;border-radius:999px;background:${PIE_COLORS[index % PIE_COLORS.length]};border:2px solid var(--line);"></span>${((data.total / expenseTotal) * 100).toFixed(0)}%</span>
                 <span class="cat-name">${escapeHtml(category)}</span>
                 <span class="cat-val">-$${data.total.toFixed(2)}</span>
-            </div>
-            <div class="sub-cat-row">
-                <span class="category-pill"><span style="display:inline-block;width:12px;height:12px;border-radius:999px;background:${PIE_COLORS[index % PIE_COLORS.length]};border:2px solid var(--line);"></span>${((data.total / expenseTotal) * 100).toFixed(0)}%</span>
             </div>
             <div class="cat-subs-list">${subBreakdown}</div>
         `;
