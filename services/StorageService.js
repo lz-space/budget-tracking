@@ -20,6 +20,9 @@ class StorageService {
 
         normalized.category = CategoryService.sanitizeName(tx.category) || 'Other';
         normalized.subCategory = CategoryService.sanitizeName(tx.subCategory) || 'General';
+        if (normalized.category === 'Income') {
+            normalized.type = 'income';
+        }
         return normalized;
     }
 

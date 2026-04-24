@@ -97,6 +97,7 @@ class CategorizationEngine {
             rules[variant] = {
                 category: selection.category,
                 subCategory: selection.subCategory,
+                type: selection.category === 'Income' ? 'income' : undefined,
                 learnedFrom: details.normalized
             };
         });
@@ -127,7 +128,8 @@ class CategorizationEngine {
                 bestMatch = {
                     score,
                     category: mapping.category,
-                    subCategory: mapping.subCategory
+                    subCategory: mapping.subCategory,
+                    type: mapping.type
                 };
             }
         });
@@ -171,10 +173,14 @@ class CategorizationEngine {
         }
 
         const selection = CategoryService.validateSelection(bestMatch.category, bestMatch.subCategory);
+        const resolvedType = selection.category === 'Income'
+            ? 'income'
+            : bestMatch.type || preferredType || this.guessType(name);
+
         return {
             c: selection.category,
             s: selection.subCategory,
-            type: bestMatch.type || preferredType || this.guessType(name)
+            type: resolvedType
         };
     }
 }
