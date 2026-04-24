@@ -132,6 +132,7 @@ function setupImportListeners() {
         const index = Number(removeButton.dataset.index);
         if (Number.isNaN(index)) return;
 
+        capturePendingPreviewEdits();
         pendingTransactions.splice(index, 1);
 
         if (pendingTransactions.length === 0) {
@@ -280,12 +281,18 @@ function openEditModal(transaction) {
 }
 
 function buildTransactionFromRow(row, draft) {
+    const transaction = readTransactionFromRow(row, draft);
+    CategorizationEngine.learnMapping(transaction.name, transaction.category, transaction.subCategory);
+    return transaction;
+}
+
+function readTransactionFromRow(row, draft) {
     const selection = CategoryService.validateSelection(
         row.querySelector('.tx-edit-category').value,
         row.querySelector('.tx-edit-subcat').value
     );
 
-    const transaction = {
+    return {
         id: draft.id,
         date: row.querySelector('.tx-edit-date').value,
         name: row.querySelector('.tx-edit-name').value,
@@ -294,9 +301,16 @@ function buildTransactionFromRow(row, draft) {
         category: selection.category,
         subCategory: selection.subCategory
     };
+}
 
-    CategorizationEngine.learnMapping(transaction.name, transaction.category, transaction.subCategory);
-    return transaction;
+function capturePendingPreviewEdits() {
+    document.querySelectorAll('.editable-tx-row').forEach((row, index) => {
+        const dataIndex = Number(row.dataset.index);
+        const pendingIndex = Number.isNaN(dataIndex) ? index : dataIndex;
+        if (!pendingTransactions[pendingIndex]) return;
+
+        pendingTransactions[pendingIndex] = readTransactionFromRow(row, pendingTransactions[pendingIndex]);
+    });
 }
 
 function showPreview(transactions) {
