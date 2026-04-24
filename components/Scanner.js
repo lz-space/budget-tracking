@@ -1,331 +1,371 @@
 class Scanner {
     static MAX_IMAGE_DIMENSION = 1800;
-    static lastOCRText = '';
-    static lastError = '';
+    static PDF_RENDER_SCALE = 2;
     static NON_TRANSACTION_TERMS = [
         'balance', 'available', 'account', 'statement', 'activity', 'ending',
         'routing', 'member fdic', 'search', 'filter', 'deposit account',
         'total', 'subtotal', 'summary', 'details', 'merchant', 'description',
-        'transactions', 'transaction history', 'current balance', 'posted date'
+        'transactions', 'transaction history', 'current balance', 'posted date',
+        'sapphire', 'preferred', 'card', 'ending in', 'manage', 'rewards'
     ];
 
-    static parseText(rawText) {
-        const lines = this.prepareLines(rawText);
-        let transactions = this.extractTransactionsFromLines(lines);
-
-        if (transactions.length === 0) {
-            const normalizedLines = this.prepareLines(this.normalizeOCRText(rawText));
-            transactions = this.extractTransactionsFromLines(normalizedLines);
-        }
-
-        return transactions;
-    }
-
-    static prepareLines(rawText) {
-        return (rawText || '')
-            .split('\n')
-            .map(line => line.trim())
-            .filter(Boolean);
-    }
-
-    static extractTransactionsFromLines(lines) {
-        const transactions = [];
-        const amountRegex = /[+\-]?\$?\s*\d[\d,\s]*(?:[.]\d{1,2})?/g;
-        const dateRegex = /\b(\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?|\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}|[A-Za-z]{3,9}\s\d{1,2}(?:,\s?\d{2,4})?)\b/;
-        const hasAnyDateHeader = lines.some(line => dateRegex.test(this.normalizeOCRText(line)));
-        let lastSeenDate = new Date().toISOString().split('T')[0];
-        let hasReachedTransactionSection = !hasAnyDateHeader;
-
-        lines.forEach((line, index) => {
-            const normalizedLine = this.normalizeOCRText(line);
-            const dateMatch = normalizedLine.match(dateRegex);
-            if (dateMatch) {
-                const normalizedDate = this.normalizeDate(dateMatch[0]);
-                if (normalizedDate) {
-                    lastSeenDate = normalizedDate;
-                    hasReachedTransactionSection = true;
-                }
-            }
-
-            if (!hasReachedTransactionSection) return;
-
-            const amountMatches = [...normalizedLine.matchAll(amountRegex)];
-            if (amountMatches.length === 0) return;
-
-            amountMatches.forEach(match => {
-                const amountToken = match[0];
-                if (!this.isLikelyAmountToken(amountToken)) return;
-                const amount = Math.abs(this.parseAmount(amountToken));
-                if (!amount || !this.isReasonableAmount(amount)) return;
-
-                if (!this.isLikelyTransactionLine(normalizedLine, amountToken)) return;
-
-                const contextLines = this.collectContextLines(lines, index);
-                const merchantCandidate = this.extractMerchantName(contextLines, amountToken, dateRegex);
-                if (!this.isLikelyMerchantName(merchantCandidate)) return;
-
-                const name = merchantCandidate;
-                const categorized = CategorizationEngine.categorize(name, CategorizationEngine.guessType(name, amountToken));
-
-                transactions.push({
-                    date: lastSeenDate,
-                    name,
-                    amount,
-                    type: categorized.type,
-                    category: categorized.c,
-                    subCategory: categorized.s
-                });
-            });
-        });
-
-        return transactions;
-    }
-
-    static collectContextLines(lines, index) {
-        const items = [];
-
-        for (let offset = -1; offset <= 1; offset += 1) {
-            const candidate = lines[index + offset];
-            if (!candidate) continue;
-            items.push({ text: candidate, offset });
-        }
-
-        return items;
-    }
-
-    static isLikelyTransactionLine(line, amountToken) {
-        const lower = (line || '').toLowerCase();
-        if (this.NON_TRANSACTION_TERMS.some(term => lower.includes(term))) {
-            return false;
-        }
-
-        const alphaCount = (line.match(/[A-Za-z]/g) || []).length;
-        const digitCount = (line.match(/\d/g) || []).length;
-        const amountCount = [...line.matchAll(/[+\-]?\$?\s*\d[\d,\s]*(?:[.]\d{1,2})?/g)].length;
-
-        if (amountCount > 2) return false;
-        if (digitCount > 18 && alphaCount < 4) return false;
-        if (String(amountToken || '').length < 4) return false;
-
-        return true;
-    }
-
-    static extractMerchantName(contextLines, amountToken, dateRegex) {
-        const candidates = [];
-
-        contextLines.forEach(item => {
-            const normalized = this.normalizeOCRText(item.text);
-            const stripped = normalized
-                .replace(new RegExp(this.escapeRegExp(amountToken), 'g'), ' ')
-                .replace(dateRegex, ' ')
-                .replace(/\b\d{2}:\d{2}\b/g, ' ')
-                .replace(/[|]/g, ' ')
-                .replace(/\s+/g, ' ')
-                .trim();
-
-            const cleaned = this.cleanVendorName(stripped);
-            if (cleaned) {
-                candidates.push({
-                    text: cleaned,
-                    score: this.scoreMerchantCandidate(cleaned, item.offset),
-                    offset: item.offset
-                });
-            }
-        });
-
-        const currentCandidate = candidates.find(candidate => candidate.offset === 0);
-        if (currentCandidate && this.isStrongCurrentLineCandidate(currentCandidate.text)) {
-            return currentCandidate.text;
-        }
-
-        candidates.sort((left, right) => right.score - left.score);
-        return candidates[0]?.text || '';
-    }
-
-    static scoreMerchantCandidate(name, offset) {
-        const words = name.split(' ').filter(Boolean);
-        const longWords = words.filter(word => word.length >= 4).length;
-        const alphaCount = (name.match(/[A-Za-z]/g) || []).length;
-        const junkPenalty = /\b(balance|account|ending|available|details|activity|statement|total|summary)\b/i.test(name) ? 18 : 0;
-        const currentLineBonus = offset === 0 ? 18 : 0;
-        const offsetPenalty = Math.abs(offset) * 18;
-
-        return alphaCount + (longWords * 8) + currentLineBonus - junkPenalty - offsetPenalty;
-    }
-
-    static isStrongCurrentLineCandidate(name) {
-        const words = name.split(' ').filter(Boolean);
-        const alphaCount = (name.match(/[A-Za-z]/g) || []).length;
-        return alphaCount >= 6 && words.length >= 1;
-    }
-
-    static isLikelyMerchantName(name) {
-        if (!name) return false;
-
-        const lower = name.toLowerCase();
-        if (this.NON_TRANSACTION_TERMS.some(term => lower.includes(term))) {
-            return false;
-        }
-
-        const words = name.split(' ').filter(Boolean);
-        const alphaCount = (name.match(/[A-Za-z]/g) || []).length;
-        const longWords = words.filter(word => word.length >= 3).length;
-
-        if (alphaCount < 3) return false;
-        if (longWords === 0) return false;
-        if (/^\d+$/.test(name)) return false;
-
-        return true;
-    }
-
-    static normalizeOCRText(rawText) {
-        return (rawText || '')
-            .replace(/[|]/g, ' ')
-            .replace(/[Oo](?=\d{2}\b)/g, '0')
-            .replace(/(?<=\d)[oO](?=\d)/g, '0')
-            .replace(/[Ss](?=\d{2}\b)/g, '5')
-            .replace(/[,](?=\d{2}\b)/g, '.')
-            .replace(/\s{2,}/g, ' ');
-    }
-
-    static parseAmount(amountToken) {
-        const normalized = String(amountToken)
-            .replace(/[Oo]/g, '0')
-            .replace(/[$,\s]/g, '')
-            .replace(/[^0-9.+-]/g, '');
-
-        const parsed = parseFloat(normalized);
-        return Number.isFinite(parsed) ? parsed : 0;
-    }
-
-    static isLikelyAmountToken(amountToken) {
-        const raw = String(amountToken || '').trim();
-        if (!/\.\d{2}\b/.test(raw)) return false;
-        if (/^\d{1,2}:\d{2}$/.test(raw)) return false;
-        return true;
-    }
-
-    static cleanVendorName(name) {
-        const cleaned = (name || '')
-            .replace(/^[^A-Za-z0-9]+/g, ' ')
-            .replace(/[\u25A0-\u25FF\u2600-\u27BF]/g, ' ')
-            .replace(/\b(pending|posted|complete|completed)\b/gi, ' ')
-            .replace(/\b(debit|credit|purchase|payment|online|transaction|card|tap|contactless|available|authorized)\b/gi, ' ')
-            .replace(/\b(today|yesterday|details|view|merchant|statement|activity|balance|account|ending)\b/gi, ' ')
-            .replace(/\b(total|subtotal|summary|transactions|history|search|filter)\b/gi, ' ')
-            .replace(/\b\d{2}:\d{2}\b/g, ' ')
-            .replace(/^[A-Z]\s+/g, ' ')
-            .replace(/^[^A-Za-z0-9]+/g, ' ')
-            .replace(/\b\d{4,}\b/g, ' ')
-            .replace(/\s{2,}/g, ' ')
-            .replace(/^[-:•.*]+/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-
-        const tokens = cleaned.split(' ').filter(Boolean);
-        const usefulTokens = tokens.filter(token => /[A-Za-z]/.test(token));
-        const result = usefulTokens.length ? usefulTokens.join(' ') : cleaned;
-        return result || '';
-    }
-
-    static normalizeDate(input) {
-        const currentYear = new Date().getFullYear();
-        let value = input.replace(/-/g, '/').trim();
-
-        if (!/\d{4}/.test(value)) {
-            value = value.includes('/') ? `${value}/${currentYear}` : `${value}, ${currentYear}`;
-        }
-
-        const parsed = new Date(value);
-        if (Number.isNaN(parsed.getTime())) return null;
-
-        const month = String(parsed.getMonth() + 1).padStart(2, '0');
-        const day = String(parsed.getDate()).padStart(2, '0');
-        return `${parsed.getFullYear()}-${month}-${day}`;
-    }
-
-    static isReasonableAmount(amount) {
-        return amount >= 0.01 && amount <= 50000;
-    }
-
-    static escapeRegExp(value) {
-        return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    }
-
-    static async processImages(fileElement, statusCallback) {
+    static async processFiles(fileElement, statusCallback) {
         if (!fileElement.files || fileElement.files.length === 0) return [];
-
-        this.lastOCRText = '';
-        this.lastError = '';
-        statusCallback('Starting local OCR...');
 
         let allTransactions = [];
 
         for (let i = 0; i < fileElement.files.length; i += 1) {
             const file = fileElement.files[i];
-            statusCallback(`Preparing image ${i + 1} of ${fileElement.files.length}...`);
+            statusCallback(`Reading file ${i + 1} of ${fileElement.files.length}...`);
 
             try {
-                if (!this.isSupportedImage(file)) {
-                    this.lastError = `Image ${i + 1} is not a supported image file.`;
-                    statusCallback(`Image ${i + 1} is not a supported image file.`);
+                if (!this.isSupportedFile(file)) {
+                    statusCallback(`File ${i + 1} is not a supported image or PDF.`);
                     continue;
                 }
 
-                const image = await this.loadImage(file);
-                const variants = this.prepareImageVariants(image);
-
-                let bestText = '';
-                let bestTransactions = [];
-
-                for (let variantIndex = 0; variantIndex < variants.length; variantIndex += 1) {
-                    const variant = variants[variantIndex];
-                    statusCallback(`Scanning image ${i + 1}/${fileElement.files.length} (${variant.label})...`);
-
-                    const result = await Tesseract.recognize(variant.canvas, 'eng', {
-                        logger: message => {
-                            if (message.status === 'recognizing text') {
-                                statusCallback(`Scanning image ${i + 1}/${fileElement.files.length} (${variant.label})... ${Math.round(message.progress * 100)}%`);
-                            }
-                        }
-                    });
-
-                    const text = result.data.text || '';
-                    const transactions = this.parseText(text);
-
-                    if (this.scoreOCRResult(text, transactions) > this.scoreOCRResult(bestText, bestTransactions)) {
-                        bestText = text;
-                        bestTransactions = transactions;
-                    }
-
-                    if (transactions.length > 0) {
-                        break;
-                    }
+                let transactions = [];
+                if (this.isPdfFile(file)) {
+                    transactions = await this.processPdf(file, statusCallback, i + 1, fileElement.files.length);
+                } else {
+                    transactions = await this.processImageFile(file, statusCallback, i + 1, fileElement.files.length);
                 }
 
-                this.lastOCRText += `\n\n--- Image ${i + 1}: ${file.name || 'image'} ---\n${bestText}`;
-                allTransactions = allTransactions.concat(bestTransactions);
+                allTransactions = allTransactions.concat(transactions);
             } catch (error) {
                 console.error(error);
-                this.lastError = `Could not read image ${i + 1}.`;
-                statusCallback(`Could not read image ${i + 1}. Try a screenshot from your photo library or a clearer PNG/JPG.`);
+                statusCallback(`Could not read file ${i + 1}. Try a clearer image or a text-based PDF.`);
             }
         }
 
         return allTransactions;
     }
 
-    static isSupportedImage(file) {
+    static isSupportedFile(file) {
         const type = (file.type || '').toLowerCase();
-        if (type.startsWith('image/')) return true;
+        if (type.startsWith('image/') || type === 'application/pdf') return true;
 
         const name = (file.name || '').toLowerCase();
-        return ['.png', '.jpg', '.jpeg', '.webp', '.heic', '.heif'].some(ext => name.endsWith(ext));
+        return ['.png', '.jpg', '.jpeg', '.webp', '.heic', '.heif', '.pdf'].some(ext => name.endsWith(ext));
     }
 
-    static async loadImage(file) {
-        const dataUrl = await this.readFileAsDataUrl(file);
+    static isPdfFile(file) {
+        const type = (file.type || '').toLowerCase();
+        const name = (file.name || '').toLowerCase();
+        return type === 'application/pdf' || name.endsWith('.pdf');
+    }
 
+    static async processImageFile(file, statusCallback, fileNumber, totalFiles) {
+        const image = await this.loadImageFile(file);
+        const variants = this.prepareImageVariants(image);
+        let bestTransactions = [];
+        let bestScore = -Infinity;
+
+        for (const variant of variants) {
+            statusCallback(`Scanning image ${fileNumber}/${totalFiles} (${variant.label})...`);
+            const ocrText = await this.runOcrOnCanvas(variant.canvas, message => {
+                statusCallback(`Scanning image ${fileNumber}/${totalFiles} (${variant.label})... ${message}%`);
+            });
+            const transactions = this.parseText(ocrText);
+            const score = this.scoreParseResult(transactions);
+
+            if (score > bestScore) {
+                bestScore = score;
+                bestTransactions = transactions;
+            }
+
+            if (transactions.length > 0) {
+                break;
+            }
+        }
+
+        return bestTransactions;
+    }
+
+    static async processPdf(file, statusCallback, fileNumber, totalFiles) {
+        if (!window.pdfjsLib) {
+            throw new Error('PDF support is still loading. Refresh and try again.');
+        }
+
+        const buffer = await file.arrayBuffer();
+        const loadingTask = window.pdfjsLib.getDocument({ data: buffer });
+        const pdf = await loadingTask.promise;
+        let allTransactions = [];
+
+        for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+            statusCallback(`Reading PDF ${fileNumber}/${totalFiles}, page ${pageNumber}/${pdf.numPages}...`);
+            const page = await pdf.getPage(pageNumber);
+            let activeDate = '';
+
+            const textLines = await this.extractPdfTextLines(page);
+            let parsed = this.parseLinesWithState(textLines, activeDate);
+            let transactions = parsed.transactions;
+            activeDate = parsed.lastActiveDate;
+
+            if (transactions.length === 0) {
+                const viewport = page.getViewport({ scale: this.PDF_RENDER_SCALE });
+                const canvas = document.createElement('canvas');
+                canvas.width = Math.ceil(viewport.width);
+                canvas.height = Math.ceil(viewport.height);
+                const context = canvas.getContext('2d', { willReadFrequently: true });
+                await page.render({ canvasContext: context, viewport }).promise;
+
+                const prepared = this.prepareCanvasForOCR(canvas, { mode: 'balanced' });
+                const ocrText = await this.runOcrOnCanvas(prepared, progress => {
+                    statusCallback(`Scanning PDF ${fileNumber}/${totalFiles}, page ${pageNumber}/${pdf.numPages}... ${progress}%`);
+                });
+                parsed = this.parseTextWithState(ocrText, activeDate);
+                transactions = parsed.transactions;
+                activeDate = parsed.lastActiveDate;
+            }
+
+            allTransactions = allTransactions.concat(transactions);
+        }
+
+        return allTransactions;
+    }
+
+    static async extractPdfTextLines(page) {
+        const textContent = await page.getTextContent();
+        const items = textContent.items
+            .map(item => ({
+                text: (item.str || '').trim(),
+                x: item.transform[4],
+                y: item.transform[5]
+            }))
+            .filter(item => item.text);
+
+        if (items.length === 0) return [];
+
+        items.sort((left, right) => {
+            if (Math.abs(left.y - right.y) > 4) {
+                return right.y - left.y;
+            }
+            return left.x - right.x;
+        });
+
+        const lines = [];
+        items.forEach(item => {
+            const existing = lines.find(line => Math.abs(line.y - item.y) <= 4);
+            if (existing) {
+                existing.parts.push(item);
+            } else {
+                lines.push({ y: item.y, parts: [item] });
+            }
+        });
+
+        return lines
+            .map(line => line.parts.sort((a, b) => a.x - b.x).map(part => part.text).join(' ').replace(/\s+/g, ' ').trim())
+            .filter(Boolean);
+    }
+
+    static parseText(rawText) {
+        return this.parseTextWithState(rawText, '').transactions;
+    }
+
+    static parseLines(lines) {
+        return this.parseLinesWithState(lines, '').transactions;
+    }
+
+    static parseTextWithState(rawText, initialDate = '') {
+        return this.parseLinesWithState(this.prepareLines(rawText), initialDate);
+    }
+
+    static parseLinesWithState(lines, initialDate = '') {
+        const transactions = [];
+        const dateRegex = /\b(\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?|\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}|[A-Za-z]{3,9}\s\d{1,2}(?:,\s?\d{2,4})?)\b/;
+        let activeDate = initialDate || '';
+
+        lines.forEach((line, index) => {
+            const normalizedLine = this.normalizeText(line);
+            const dateMatch = normalizedLine.match(dateRegex);
+            let lineDate = '';
+
+            if (dateMatch) {
+                lineDate = this.normalizeDate(dateMatch[0]);
+            }
+
+            if (lineDate && !this.lineHasAmount(normalizedLine)) {
+                activeDate = lineDate;
+                return;
+            }
+
+            const amountMatch = this.extractAmountToken(normalizedLine);
+            if (!amountMatch) return;
+
+            const amount = this.parseAmount(amountMatch);
+            if (!this.isReasonableAmount(amount)) return;
+            if (!this.isLikelyTransactionLine(normalizedLine)) return;
+
+            const name = this.extractTransactionName(lines, index, amountMatch, dateRegex);
+            if (!this.isLikelyMerchantName(name)) return;
+
+            const categorized = CategorizationEngine.categorize(name, CategorizationEngine.guessType(name, amountMatch));
+            transactions.push({
+                date: lineDate || activeDate,
+                name,
+                amount,
+                type: categorized.type,
+                category: categorized.c,
+                subCategory: categorized.s
+            });
+
+            if (lineDate) {
+                activeDate = lineDate;
+            }
+        });
+
+        return {
+            transactions,
+            lastActiveDate: activeDate
+        };
+    }
+
+    static prepareLines(rawText) {
+        return (rawText || '')
+            .split('\n')
+            .map(line => this.normalizeText(line))
+            .filter(Boolean);
+    }
+
+    static normalizeText(text) {
+        return (text || '')
+            .replace(/[|]/g, ' ')
+            .replace(/[Oo](?=\d{2}\b)/g, '0')
+            .replace(/(?<=\d)[oO](?=\d)/g, '0')
+            .replace(/[Ss](?=\d{2}\b)/g, '5')
+            .replace(/[,](?=\d{2}\b)/g, '.')
+            .replace(/\s{2,}/g, ' ')
+            .trim();
+    }
+
+    static lineHasAmount(line) {
+        return Boolean(this.extractAmountToken(line));
+    }
+
+    static extractAmountToken(line) {
+        if (!line) return '';
+        const matches = [...line.matchAll(/[+\-]?\$?\s*\d[\d,\s]*(?:[.]\d{2})/g)];
+        if (matches.length !== 1) return '';
+
+        const amountToken = matches[0][0].trim();
+        if (!/\.\d{2}\b/.test(amountToken)) return '';
+        if (/^\d{1,2}:\d{2}$/.test(amountToken)) return '';
+        return amountToken;
+    }
+
+    static parseAmount(token) {
+        const normalized = String(token || '')
+            .replace(/[Oo]/g, '0')
+            .replace(/[$,\s]/g, '')
+            .replace(/[^0-9.+-]/g, '');
+
+        const parsed = parseFloat(normalized);
+        return Number.isFinite(parsed) ? Math.abs(parsed) : 0;
+    }
+
+    static isReasonableAmount(amount) {
+        return amount >= 0.01 && amount <= 50000;
+    }
+
+    static isLikelyTransactionLine(line) {
+        const lower = line.toLowerCase();
+        if (this.NON_TRANSACTION_TERMS.some(term => lower.includes(term))) return false;
+
+        const digitCount = (line.match(/\d/g) || []).length;
+        const alphaCount = (line.match(/[A-Za-z]/g) || []).length;
+        if (digitCount > 18 && alphaCount < 4) return false;
+        return true;
+    }
+
+    static extractTransactionName(lines, index, amountToken, dateRegex) {
+        const current = this.cleanNameCandidate(
+            lines[index]
+                .replace(new RegExp(this.escapeRegExp(amountToken), 'g'), ' ')
+                .replace(dateRegex, ' ')
+        );
+
+        const previous = index > 0 ? this.cleanNameCandidate(lines[index - 1].replace(dateRegex, ' ')) : '';
+        const next = index + 1 < lines.length ? this.cleanNameCandidate(lines[index + 1].replace(dateRegex, ' ')) : '';
+
+        if (this.isStrongMerchantName(current)) {
+            if (this.looksLikeContinuation(next) && !this.lineHasAmount(lines[index + 1] || '')) {
+                return this.cleanNameCandidate(`${current} ${next}`);
+            }
+            return current;
+        }
+
+        if (previous && !this.lineHasAmount(lines[index - 1] || '') && this.isStrongMerchantName(previous)) {
+            if (current && this.looksLikeContinuation(current)) {
+                return this.cleanNameCandidate(`${previous} ${current}`);
+            }
+            return previous;
+        }
+
+        if (current) return current;
+        if (next && !this.lineHasAmount(lines[index + 1] || '')) return next;
+        return '';
+    }
+
+    static cleanNameCandidate(text) {
+        const cleaned = (text || '')
+            .replace(/[\u25A0-\u25FF\u2600-\u27BF]/g, ' ')
+            .replace(/\b(pending|posted|complete|completed|debit|credit|purchase|payment|online|transaction|card|tap|contactless|available|authorized)\b/gi, ' ')
+            .replace(/\b(today|yesterday|details|view|merchant|statement|activity|balance|account|ending|total|subtotal|summary|transactions|history|search|filter)\b/gi, ' ')
+            .replace(/\b\d{2}:\d{2}\b/g, ' ')
+            .replace(/\b\d{4,}\b/g, ' ')
+            .replace(/^[^A-Za-z0-9]+/g, ' ')
+            .replace(/^[-:•.*]+/g, ' ')
+            .replace(/\s{2,}/g, ' ')
+            .trim();
+
+        return cleaned;
+    }
+
+    static isLikelyMerchantName(name) {
+        if (!name) return false;
+        const lower = name.toLowerCase();
+        if (this.NON_TRANSACTION_TERMS.some(term => lower.includes(term))) return false;
+
+        const alphaCount = (name.match(/[A-Za-z]/g) || []).length;
+        const words = name.split(' ').filter(Boolean);
+        if (alphaCount < 3) return false;
+        if (words.length === 0) return false;
+        if (/^\d+$/.test(name)) return false;
+        return true;
+    }
+
+    static isStrongMerchantName(name) {
+        if (!this.isLikelyMerchantName(name)) return false;
+        const alphaCount = (name.match(/[A-Za-z]/g) || []).length;
+        return alphaCount >= 5;
+    }
+
+    static looksLikeContinuation(text) {
+        if (!text) return false;
+        const words = text.split(' ').filter(Boolean);
+        return words.length <= 3 || /-$/.test(text) || text === text.toUpperCase();
+    }
+
+    static normalizeDate(input) {
+        if (!input) return '';
+
+        const currentYear = new Date().getFullYear();
+        let value = input.replace(/-/g, '/').trim();
+        if (!/\d{4}/.test(value)) {
+            value = value.includes('/') ? `${value}/${currentYear}` : `${value}, ${currentYear}`;
+        }
+
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) return '';
+
+        const month = String(parsed.getMonth() + 1).padStart(2, '0');
+        const day = String(parsed.getDate()).padStart(2, '0');
+        return `${parsed.getFullYear()}-${month}-${day}`;
+    }
+
+    static async loadImageFile(file) {
+        const dataUrl = await this.readFileAsDataUrl(file);
         return new Promise((resolve, reject) => {
             const image = new Image();
             image.onload = () => resolve(image);
@@ -354,19 +394,26 @@ class Scanner {
         const width = image.naturalWidth || image.width;
         const height = image.naturalHeight || image.height;
         const scale = Math.min(1, this.MAX_IMAGE_DIMENSION / Math.max(width, height));
-        const targetWidth = Math.max(1, Math.round(width * scale));
-        const targetHeight = Math.max(1, Math.round(height * scale));
-
         const canvas = document.createElement('canvas');
-        canvas.width = targetWidth;
-        canvas.height = targetHeight;
+        canvas.width = Math.max(1, Math.round(width * scale));
+        canvas.height = Math.max(1, Math.round(height * scale));
 
         const context = canvas.getContext('2d', { willReadFrequently: true });
         context.fillStyle = '#ffffff';
-        context.fillRect(0, 0, targetWidth, targetHeight);
-        context.drawImage(image, 0, 0, targetWidth, targetHeight);
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
 
-        const imageData = context.getImageData(0, 0, targetWidth, targetHeight);
+        return this.prepareCanvasForOCR(canvas, options);
+    }
+
+    static prepareCanvasForOCR(canvas, options = {}) {
+        const clone = document.createElement('canvas');
+        clone.width = canvas.width;
+        clone.height = canvas.height;
+        const context = clone.getContext('2d', { willReadFrequently: true });
+        context.drawImage(canvas, 0, 0);
+
+        const imageData = context.getImageData(0, 0, clone.width, clone.height);
         const data = imageData.data;
 
         for (let i = 0; i < data.length; i += 4) {
@@ -385,13 +432,29 @@ class Scanner {
         }
 
         context.putImageData(imageData, 0, 0);
-        return canvas;
+        return clone;
     }
 
-    static scoreOCRResult(text, transactions) {
-        const normalizedText = (text || '').trim();
-        const namedTransactions = transactions.filter(transaction => transaction.name && transaction.name !== 'Unknown Vendor').length;
-        return (transactions.length * 1000) + (namedTransactions * 250) + normalizedText.length;
+    static async runOcrOnCanvas(canvas, progressCallback) {
+        const result = await Tesseract.recognize(canvas, 'eng', {
+            logger: message => {
+                if (message.status === 'recognizing text' && progressCallback) {
+                    progressCallback(Math.round(message.progress * 100));
+                }
+            }
+        });
+
+        return result.data.text || '';
+    }
+
+    static scoreParseResult(transactions) {
+        const namedTransactions = transactions.filter(tx => tx.name && tx.name !== 'Unknown Vendor').length;
+        const datedTransactions = transactions.filter(tx => tx.date).length;
+        return (transactions.length * 100) + (namedTransactions * 20) + datedTransactions;
+    }
+
+    static escapeRegExp(value) {
+        return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
 }
 

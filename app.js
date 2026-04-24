@@ -70,13 +70,24 @@ function setupImportListeners() {
         helpBox.classList.add('hidden');
         helpBox.textContent = '';
         statusMsg.classList.remove('hidden');
-        const transactions = await Scanner.processImages(fileInput, message => {
-            statusMsg.textContent = message;
-        });
+        let transactions = [];
+        try {
+            transactions = await Scanner.processFiles(fileInput, message => {
+                statusMsg.textContent = message;
+            });
+        } catch (err) {
+            console.error('Scan error:', err);
+            transactions = { error: 'An unexpected error occurred during scanning: ' + err.message };
+        }
+        
         statusMsg.classList.add('hidden');
         if (transactions.length === 0) {
             helpBox.textContent = buildMobileScanHelp();
             helpBox.classList.remove('hidden');
+        } else if (transactions.error) {
+            helpBox.textContent = transactions.error;
+            helpBox.classList.remove('hidden');
+            return;
         }
         showPreview(transactions);
         fileInput.value = '';
@@ -89,10 +100,25 @@ function setupImportListeners() {
 
     document.getElementById('save-import').addEventListener('click', () => {
         const rows = document.querySelectorAll('.editable-tx-row');
+        let hasMissingFields = false;
+
         const reviewedTransactions = Array.from(rows).map(row => {
             const index = Number(row.dataset.index);
+            const dateInput = row.querySelector('.tx-edit-date');
+            if (!dateInput.value) {
+                hasMissingFields = true;
+                dateInput.style.border = '2px solid red';
+            } else {
+                dateInput.style.border = '';
+            }
             return buildTransactionFromRow(row, pendingTransactions[index] || {});
         });
+
+        if (hasMissingFields) {
+            alert('Please review and fill in all missing transaction details (highlighted in red) before saving.');
+            return;
+        }
+
         StorageService.saveMultipleTransactions(reviewedTransactions);
         pendingTransactions = [];
         document.getElementById('import-preview-area').classList.add('hidden');
@@ -787,20 +813,36 @@ function renderCategoryEditor() {
 }
 
 function buildMobileScanHelp() {
-    return 'No transactions were detected. On phones, Safari is usually the most reliable for scanning. Try a tighter screenshot, crop extra icons or top bars, and use PNG or JPG if Chrome keeps missing text.';
+    return 'No transactions were detected. Try a cleaner screenshot or a PDF with selectable text. If a date is missing, you can fill it in during review.';
 }
 
 function setupDataManagementListeners() {
     document.getElementById('clear-month-data').addEventListener('click', () => {
-        if (!currentMonthView) return;
-        if (!confirm(`Delete all transactions in ${currentMonthView}?`)) return;
-        const filtered = StorageService.getTransactions().filter(transaction => !transaction.date.startsWith(currentMonthView));
-        StorageService.replaceTransactions(filtered);
+        const selectedMonth = document.getElementById('month-select')?.value || currentMonthView;
+        if (!selectedMonth || selectedMonth === 'No data') return;
+
+        if (!confirm(`Delete all transactions in ${selectedMonth}? Your customized categories and learning rules will stay saved.`)) return;
+
+        const transactions = StorageService.getTransactions();
+        const remaining = transactions.filter(transaction => {
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(transaction.date || '')) {
+                return true;
+            }
+            return !transaction.date.startsWith(selectedMonth);
+        });
+
+        if (remaining.length === transactions.length) {
+            alert('No transactions were found for that month.');
+            return;
+        }
+
+        StorageService.replaceTransactions(remaining);
+        currentMonthView = null;
         renderAll();
     });
 
     document.getElementById('clear-all-data').addEventListener('click', () => {
-        if (!confirm('Delete every saved transaction? This cannot be undone.')) return;
+        if (!confirm('Delete every saved transaction? This cannot be undone. Rest assured, your customized categories and learning rules will NOT be deleted.')) return;
         StorageService.clearAll();
         renderAll();
     });
