@@ -1,5 +1,6 @@
 class Scanner {
     static MAX_IMAGE_DIMENSION = 1800;
+    static MAX_OCR_IMAGE_DIMENSION = 2600;
     static PDF_RENDER_SCALE = 3;
     static NON_TRANSACTION_TERMS = [
         'balance', 'available', 'account', 'statement', 'activity', 'ending',
@@ -63,10 +64,10 @@ class Scanner {
 
         for (const variant of variants) {
             statusCallback(`Scanning image ${fileNumber}/${totalFiles} (${variant.label})...`);
-            const ocrText = await this.runOcrOnCanvas(variant.canvas, message => {
+            const ocrData = await this.runOcrDataOnCanvas(variant.canvas, message => {
                 statusCallback(`Scanning image ${fileNumber}/${totalFiles} (${variant.label})... ${message}%`);
             });
-            const transactions = this.parseText(ocrText);
+            const transactions = this.parseImageOcrDataWithState(ocrData, '').transactions;
             const score = this.scoreParseResult(transactions);
 
             if (score > bestScore) {
@@ -74,7 +75,7 @@ class Scanner {
                 bestTransactions = transactions;
             }
 
-            if (transactions.length > 0) {
+            if (variant.tableOptimized && transactions.length >= 8) {
                 break;
             }
         }
@@ -206,12 +207,41 @@ class Scanner {
     }
 
     static parseTextWithState(rawText, initialDate = '') {
-        return this.parseLinesWithState(this.prepareLines(rawText), initialDate);
+        const lines = this.prepareLines(rawText);
+        const tableParsed = this.parseTransactionTableLinesWithState(lines, initialDate);
+        const standardParsed = this.parseLinesWithState(lines, initialDate);
+
+        return this.scoreParseResult(tableParsed.transactions) > this.scoreParseResult(standardParsed.transactions)
+            ? tableParsed
+            : standardParsed;
+    }
+
+    static parseImageOcrDataWithState(ocrData, initialDate = '') {
+        const positionedTable = this.parsePositionedTransactionTableWithState(ocrData, initialDate);
+        const textParsed = this.parseTextWithState((ocrData && ocrData.text) || '', initialDate);
+
+        if (positionedTable.isTable && positionedTable.transactions.length > 0) {
+            return positionedTable;
+        }
+
+        return this.scoreParseResult(positionedTable.transactions) >= this.scoreParseResult(textParsed.transactions)
+            ? positionedTable
+            : textParsed;
     }
 
     static parsePdfOcrDataWithState(ocrData, initialDate = '') {
+        const positionedTable = this.parsePositionedTransactionTableWithState(ocrData, initialDate);
+        if (positionedTable.transactions.length > 0) {
+            return positionedTable;
+        }
+
         const positionedLines = this.extractOcrPositionedLines(ocrData);
         if (positionedLines.length > 0) {
+            const tableParsed = this.parseTransactionTableLinesWithState(positionedLines, initialDate);
+            if (tableParsed.transactions.length > 0) {
+                return tableParsed;
+            }
+
             const parsed = this.parseLinesWithState(positionedLines, initialDate);
             if (parsed.transactions.length > 0) {
                 return parsed;
@@ -221,8 +251,203 @@ class Scanner {
         return this.parseTextWithState((ocrData && ocrData.text) || '', initialDate);
     }
 
-    static extractOcrPositionedLines(ocrData) {
-        const words = ((ocrData && ocrData.words) || [])
+    static parseTransactionTableLinesWithState(lines, initialDate = '') {
+        const transactions = [];
+        const dateRegex = this.dateTokenRegex();
+        let activeDate = initialDate || '';
+
+        lines.forEach(line => {
+            const normalizedLine = this.normalizeText(line);
+            if (!this.looksLikeTransactionTableLine(normalizedLine)) return;
+
+            const dateMatch = normalizedLine.match(dateRegex);
+            const lineDate = dateMatch ? this.normalizeDate(dateMatch[0]) : activeDate;
+            if (dateMatch && lineDate) activeDate = lineDate;
+
+            const amountTokens = this.extractAmountTokens(normalizedLine);
+            if (amountTokens.length === 0) return;
+
+            const amountToken = this.chooseTableTransactionAmountToken(normalizedLine, amountTokens);
+            const amount = this.parseAmount(amountToken);
+            if (!this.isReasonableAmount(amount)) return;
+
+            const name = this.cleanNameCandidate(
+                normalizedLine
+                    .slice(0, amountTokens[0].index)
+                    .replace(dateRegex, ' ')
+                    .replace(/\b(type|amount|balance|description|posting date)\b/gi, ' ')
+            );
+            if (!this.isLikelyMerchantName(name)) return;
+
+            const categorized = CategorizationEngine.categorize(name, CategorizationEngine.guessType(name, amountToken));
+            transactions.push({
+                date: lineDate,
+                name,
+                amount,
+                type: categorized.type,
+                category: categorized.c,
+                subCategory: categorized.s
+            });
+        });
+
+        return {
+            transactions,
+            lastActiveDate: activeDate
+        };
+    }
+
+    static parsePositionedTransactionTableWithState(ocrData, initialDate = '') {
+        const rows = this.extractOcrRows(ocrData);
+        if (rows.length === 0) {
+            return { transactions: [], lastActiveDate: initialDate || '', isTable: false };
+        }
+
+        const columnHints = this.detectTransactionTableColumns(rows);
+        if (!columnHints) {
+            return { transactions: [], lastActiveDate: initialDate || '', isTable: false };
+        }
+
+        const transactions = [];
+        const dateRegex = this.dateTokenRegex();
+        let activeDate = initialDate || '';
+
+        rows.forEach(row => {
+            const line = this.normalizeText(row.text);
+            if (!line || this.isTableHeaderOrSummaryLine(line)) return;
+
+            const dateMatch = line.match(dateRegex);
+            if (!dateMatch) return;
+
+            const lineDate = this.normalizeDate(dateMatch[0]);
+            if (!lineDate) return;
+            activeDate = lineDate;
+
+            const moneyWords = this.extractMoneyWords(row.words);
+            if (moneyWords.length === 0) return;
+
+            const amountWord = this.choosePositionedAmountWord(moneyWords, columnHints);
+            if (!amountWord) return;
+
+            const amount = this.parseAmount(amountWord.text);
+            if (!this.isReasonableAmount(amount)) return;
+
+            const nameWords = row.words.filter(word => {
+                const center = this.wordCenterX(word);
+                return center > columnHints.descriptionStartX &&
+                    center < Math.min(amountWord.x0 - 4, columnHints.descriptionEndX) &&
+                    !dateRegex.test(word.text) &&
+                    !this.extractAmountTokens(word.text).length;
+            });
+
+            const name = this.cleanNameCandidate(nameWords.map(word => word.text).join(' '));
+            if (!this.isLikelyMerchantName(name)) return;
+
+            const categorized = CategorizationEngine.categorize(name, CategorizationEngine.guessType(name, amountWord.text));
+            transactions.push({
+                date: lineDate,
+                name,
+                amount,
+                type: categorized.type,
+                category: categorized.c,
+                subCategory: categorized.s
+            });
+        });
+
+        return {
+            transactions,
+            lastActiveDate: activeDate,
+            isTable: true
+        };
+    }
+
+    static extractOcrRows(ocrData) {
+        const words = this.extractPositionedWords(ocrData);
+        if (words.length === 0) return [];
+
+        const dateAnchoredRows = this.extractDateAnchoredRows(words);
+        if (dateAnchoredRows.length >= 3) {
+            return dateAnchoredRows;
+        }
+
+        return this.groupWordsIntoRows(words);
+    }
+
+    static extractDateAnchoredRows(words) {
+        const maxX = Math.max(...words.map(word => word.x1));
+        const leftDateLimit = maxX * 0.32;
+        const dateRegex = this.dateTokenRegex();
+        const dateAnchors = [];
+
+        words
+            .filter(word => word.x0 <= leftDateLimit && dateRegex.test(word.text))
+            .sort((a, b) => a.y - b.y || a.x0 - b.x0)
+            .forEach(word => {
+                const existing = dateAnchors.find(anchor => Math.abs(anchor.y - word.y) <= Math.max(8, word.height * 0.7));
+                if (existing) {
+                    if (word.x0 < existing.x0) {
+                        existing.x0 = word.x0;
+                        existing.y = word.y;
+                    }
+                } else {
+                    dateAnchors.push({ y: word.y, x0: word.x0 });
+                }
+            });
+
+        if (dateAnchors.length < 3) return [];
+
+        return dateAnchors.map((anchor, index) => {
+            const previous = dateAnchors[index - 1];
+            const next = dateAnchors[index + 1];
+            const top = previous ? (previous.y + anchor.y) / 2 : anchor.y - this.estimateRowHalfHeight(dateAnchors, index);
+            const bottom = next ? (anchor.y + next.y) / 2 : anchor.y + this.estimateRowHalfHeight(dateAnchors, index);
+            const rowWords = words.filter(word => word.y >= top && word.y < bottom);
+
+            return this.buildOcrRow(anchor.y, rowWords);
+        }).filter(row => row.text && this.dateTokenRegex().test(row.text));
+    }
+
+    static estimateRowHalfHeight(anchors, index) {
+        const gaps = [];
+        if (anchors[index - 1]) gaps.push(Math.abs(anchors[index].y - anchors[index - 1].y));
+        if (anchors[index + 1]) gaps.push(Math.abs(anchors[index + 1].y - anchors[index].y));
+
+        const gap = gaps.length ? Math.min(...gaps) : 24;
+        return Math.max(10, gap / 2);
+    }
+
+    static groupWordsIntoRows(words) {
+        const averageHeight = words.reduce((sum, word) => sum + word.height, 0) / words.length;
+        const rowTolerance = Math.max(8, averageHeight * 0.6);
+        const rows = [];
+
+        words
+            .sort((a, b) => a.y - b.y || a.x0 - b.x0)
+            .forEach(word => {
+                const row = rows.find(candidate => Math.abs(candidate.y - word.y) <= rowTolerance);
+                if (row) {
+                    row.words.push(word);
+                    row.y = (row.y * (row.words.length - 1) + word.y) / row.words.length;
+                } else {
+                    rows.push({ y: word.y, words: [word] });
+                }
+            });
+
+        return rows
+            .map(row => this.buildOcrRow(row.y, row.words))
+            .filter(row => row.text);
+    }
+
+    static buildOcrRow(y, words) {
+        const sortedWords = words.sort((a, b) => a.x0 - b.x0);
+        return {
+            y,
+            words: sortedWords,
+            text: this.normalizeText(sortedWords.map(word => word.text).join(' '))
+        };
+    }
+
+    static extractPositionedWords(ocrData) {
+        return ((ocrData && ocrData.words) || [])
             .map(word => {
                 const bbox = word.bbox || {};
                 const text = this.normalizeText(word.text || '');
@@ -239,31 +464,82 @@ class Scanner {
                     height: Number.isFinite(y0) && Number.isFinite(y1) ? Math.max(1, y1 - y0) : 12
                 };
             })
-            .filter(word => word.text && Number.isFinite(word.x0) && Number.isFinite(word.y));
+            .filter(word => word.text && Number.isFinite(word.x0) && Number.isFinite(word.x1) && Number.isFinite(word.y));
+    }
 
-        if (words.length === 0) return [];
+    static detectTransactionTableColumns(rows) {
+        const allWords = rows.flatMap(row => row.words);
+        if (allWords.length === 0) return null;
 
-        const averageHeight = words.reduce((sum, word) => sum + word.height, 0) / words.length;
-        const rowTolerance = Math.max(8, averageHeight * 0.55);
-        const rows = [];
+        const maxX = Math.max(...allWords.map(word => word.x1));
+        const headerWords = allWords.filter(word => /^(posting|date|description|type|amount|balance)$/i.test(word.text));
+        const amountHeader = headerWords.find(word => /^amount$/i.test(word.text));
+        const balanceHeader = headerWords.find(word => /^balance$/i.test(word.text));
+        const descriptionHeader = headerWords.find(word => /^description$/i.test(word.text));
+        const typeHeader = headerWords.find(word => /^type$/i.test(word.text));
 
-        words
-            .sort((a, b) => a.y - b.y || a.x0 - b.x0)
-            .forEach(word => {
-                const row = rows.find(candidate => Math.abs(candidate.y - word.y) <= rowTolerance);
-                if (row) {
-                    row.words.push(word);
-                    row.y = (row.y * (row.words.length - 1) + word.y) / row.words.length;
-                } else {
-                    rows.push({ y: word.y, words: [word] });
-                }
-            });
+        const amountX = amountHeader ? this.wordCenterX(amountHeader) : maxX * 0.82;
+        const balanceX = balanceHeader ? this.wordCenterX(balanceHeader) : maxX * 0.94;
+        const descriptionStartX = descriptionHeader ? Math.max(0, descriptionHeader.x0 - 10) : maxX * 0.16;
+        const descriptionEndX = typeHeader ? Math.max(descriptionStartX + 20, typeHeader.x0 - 8) : amountX - 60;
 
-        return rows
-            .sort((a, b) => a.y - b.y)
-            .map(row => row.words.sort((a, b) => a.x0 - b.x0).map(word => word.text).join(' '))
-            .map(line => this.normalizeText(line))
+        const hasHeader = Boolean(amountHeader && (balanceHeader || descriptionHeader));
+        const hasTableRows = rows.some(row => this.dateTokenRegex().test(row.text) && this.extractMoneyWords(row.words).length >= 1);
+
+        if (!hasHeader && !hasTableRows) return null;
+
+        return {
+            amountX,
+            balanceX,
+            descriptionStartX,
+            descriptionEndX
+        };
+    }
+
+    static extractMoneyWords(words) {
+        return words
+            .map(word => {
+                const tokens = this.extractAmountTokens(word.text);
+                if (tokens.length === 0) return null;
+                return {
+                    ...word,
+                    text: tokens[tokens.length - 1].text
+                };
+            })
             .filter(Boolean);
+    }
+
+    static choosePositionedAmountWord(moneyWords, columnHints) {
+        if (moneyWords.length === 0) return null;
+        if (moneyWords.length === 1) return moneyWords[0];
+
+        const scored = moneyWords.map(word => {
+            const center = this.wordCenterX(word);
+            const amountDistance = Math.abs(center - columnHints.amountX);
+            const balanceDistance = Math.abs(center - columnHints.balanceX);
+            const balancePenalty = balanceDistance < amountDistance ? 2000 : 0;
+
+            return {
+                word,
+                score: amountDistance + balancePenalty
+            };
+        });
+
+        scored.sort((a, b) => a.score - b.score);
+        return scored[0].word;
+    }
+
+    static wordCenterX(word) {
+        return (Number(word.x0) + Number(word.x1)) / 2;
+    }
+
+    static isTableHeaderOrSummaryLine(line) {
+        const lower = String(line || '').toLowerCase();
+        return /\b(posting date|description|amount|balance|total|payments and other credits|purchases and adjustments|interest charged)\b/.test(lower);
+    }
+
+    static extractOcrPositionedLines(ocrData) {
+        return this.extractOcrRows(ocrData).map(row => row.text);
     }
 
     static parseLinesWithState(lines, initialDate = '') {
@@ -375,6 +651,33 @@ class Scanner {
         // immediately before that balance instead of rejecting the whole row.
         if (this.looksLikeStatementAmountRow(line, tokens)) {
             return tokens[tokens.length - 2].text;
+        }
+
+        return tokens[0].text;
+    }
+
+    static looksLikeTransactionTableLine(line) {
+        const normalizedLine = this.normalizeText(line);
+        const hasDate = this.dateTokenRegex().test(normalizedLine);
+        const amountTokens = this.extractAmountTokens(normalizedLine);
+        const merchantName = this.cleanNameCandidate(
+            normalizedLine
+                .slice(0, amountTokens[0] ? amountTokens[0].index : normalizedLine.length)
+                .replace(this.dateTokenRegex(), ' ')
+        );
+
+        return hasDate && amountTokens.length >= 1 && this.isLikelyMerchantName(merchantName);
+    }
+
+    static chooseTableTransactionAmountToken(line, tokens) {
+        if (tokens.length === 0) return '';
+        if (tokens.length === 1) return tokens[0].text;
+
+        const firstAmount = this.parseAmount(tokens[0].text);
+        const secondAmount = this.parseAmount(tokens[1].text);
+
+        if (firstAmount === 0 && secondAmount > 0) {
+            return tokens[1].text;
         }
 
         return tokens[0].text;
@@ -593,15 +896,18 @@ class Scanner {
 
     static prepareImageVariants(image) {
         return [
-            { label: 'balanced', canvas: this.prepareImageForOCR(image, { mode: 'balanced' }) },
-            { label: 'high contrast', canvas: this.prepareImageForOCR(image, { mode: 'contrast' }) }
+            { label: 'table high-res', canvas: this.prepareImageForOCR(image, { mode: 'table', minScale: 3 }), tableOptimized: true },
+            { label: 'sharp high-res', canvas: this.prepareImageForOCR(image, { mode: 'contrast', minScale: 2.4 }), tableOptimized: true },
+            { label: 'balanced', canvas: this.prepareImageForOCR(image, { mode: 'balanced', minScale: 1.8 }) },
+            { label: 'plain', canvas: this.prepareImageForOCR(image, { mode: 'none', minScale: 1.8 }) }
         ];
     }
 
     static prepareImageForOCR(image, options = {}) {
         const width = image.naturalWidth || image.width;
         const height = image.naturalHeight || image.height;
-        const scale = Math.min(1, this.MAX_IMAGE_DIMENSION / Math.max(width, height));
+        const requestedScale = Math.max(1, Number(options.minScale) || 1);
+        const scale = Math.min(requestedScale, this.MAX_OCR_IMAGE_DIMENSION / Math.max(width, height));
         const canvas = document.createElement('canvas');
         canvas.width = Math.max(1, Math.round(width * scale));
         canvas.height = Math.max(1, Math.round(height * scale));
@@ -609,6 +915,8 @@ class Scanner {
         const context = canvas.getContext('2d', { willReadFrequently: true });
         context.fillStyle = '#ffffff';
         context.fillRect(0, 0, canvas.width, canvas.height);
+        context.imageSmoothingEnabled = true;
+        context.imageSmoothingQuality = 'high';
         context.drawImage(image, 0, 0, canvas.width, canvas.height);
 
         return this.prepareCanvasForOCR(canvas, options);
@@ -637,6 +945,8 @@ class Scanner {
 
             if (options.mode === 'none') {
                 nextValue = grayscale;
+            } else if (options.mode === 'table') {
+                nextValue = grayscale > 220 ? 255 : grayscale < 170 ? 0 : grayscale;
             } else if (options.mode === 'contrast') {
                 nextValue = grayscale > 165 ? 255 : grayscale < 135 ? 0 : grayscale;
             } else {
