@@ -102,7 +102,7 @@ class Scanner {
             let transactions = parsed.transactions;
             activeDate = parsed.lastActiveDate;
 
-            if (transactions.length === 0) {
+            if (this.shouldUsePdfOcr(textLines, transactions)) {
                 const viewport = page.getViewport({ scale: this.PDF_RENDER_SCALE });
                 const canvas = document.createElement('canvas');
                 canvas.width = Math.ceil(viewport.width);
@@ -115,8 +115,13 @@ class Scanner {
                     statusCallback(`Scanning PDF ${fileNumber}/${totalFiles}, page ${pageNumber}/${pdf.numPages}... ${progress}%`);
                 });
                 parsed = this.parseTextWithState(ocrText, activeDate);
-                transactions = parsed.transactions;
-                activeDate = parsed.lastActiveDate;
+                if (
+                    this.shouldPreferPdfOcr(textLines, transactions, parsed.transactions) ||
+                    this.scoreParseResult(parsed.transactions) > this.scoreParseResult(transactions)
+                ) {
+                    transactions = parsed.transactions;
+                    activeDate = parsed.lastActiveDate;
+                }
             }
 
             allTransactions = allTransactions.concat(transactions);
@@ -173,7 +178,7 @@ class Scanner {
 
     static parseLinesWithState(lines, initialDate = '') {
         const transactions = [];
-        const dateRegex = /\b(\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?|\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}|[A-Za-z]{3,9}\s\d{1,2}(?:,\s?\d{2,4})?)\b/;
+        const dateRegex = this.dateTokenRegex();
         let activeDate = initialDate || '';
 
         lines.forEach((line, index) => {
@@ -230,6 +235,8 @@ class Scanner {
 
     static normalizeText(text) {
         return (text || '')
+            .replace(/\u00a0/g, ' ')
+            .replace(/\u2212/g, '-')
             .replace(/[|]/g, ' ')
             .replace(/[Oo](?=\d{2}\b)/g, '0')
             .replace(/(?<=\d)[oO](?=\d)/g, '0')
@@ -245,13 +252,47 @@ class Scanner {
 
     static extractAmountToken(line) {
         if (!line) return '';
-        const matches = [...line.matchAll(/[+\-]?\$?\s*\d[\d,\s]*(?:[.]\d{2})/g)];
-        if (matches.length !== 1) return '';
+        const tokens = this.extractAmountTokens(line);
+        if (tokens.length === 0) return '';
 
-        const amountToken = matches[0][0].trim();
-        if (!/\.\d{2}\b/.test(amountToken)) return '';
-        if (/^\d{1,2}:\d{2}$/.test(amountToken)) return '';
-        return amountToken;
+        if (tokens.length === 1) {
+            return tokens[0].text;
+        }
+
+        return this.chooseTransactionAmountToken(line, tokens);
+    }
+
+    static extractAmountTokens(line) {
+        return [...String(line || '').matchAll(this.amountTokenRegex())]
+            .map(match => ({
+                text: match[0].trim(),
+                index: match.index || 0
+            }))
+            .filter(token => /\.\d{2}\)?\b/.test(token.text))
+            .filter(token => !/^\d{1,2}:\d{2}$/.test(token.text));
+    }
+
+    static chooseTransactionAmountToken(line, tokens) {
+        if (tokens.length === 0) return '';
+        if (tokens.length === 1) return tokens[0].text;
+
+        // Bank statement rows often end with a running balance. Use the amount
+        // immediately before that balance instead of rejecting the whole row.
+        if (this.looksLikeStatementAmountRow(line, tokens)) {
+            return tokens[tokens.length - 2].text;
+        }
+
+        return tokens[0].text;
+    }
+
+    static looksLikeStatementAmountRow(line, tokens) {
+        if (tokens.length < 2) return false;
+
+        const lower = String(line || '').toLowerCase();
+        const hasDate = this.dateTokenRegex().test(line);
+        const hasStatementWords = /\b(balance|ending|opening|ledger|posted|available)\b/.test(lower);
+
+        return hasDate || hasStatementWords || tokens.length >= 3;
     }
 
     static parseAmount(token) {
@@ -280,13 +321,11 @@ class Scanner {
 
     static extractTransactionName(lines, index, amountToken, dateRegex) {
         const current = this.cleanNameCandidate(
-            lines[index]
-                .replace(new RegExp(this.escapeRegExp(amountToken), 'g'), ' ')
-                .replace(dateRegex, ' ')
+            this.stripTransactionTokens(lines[index])
         );
 
-        const previous = index > 0 ? this.cleanNameCandidate(lines[index - 1].replace(dateRegex, ' ')) : '';
-        const next = index + 1 < lines.length ? this.cleanNameCandidate(lines[index + 1].replace(dateRegex, ' ')) : '';
+        const previous = index > 0 ? this.cleanNameCandidate(this.stripTransactionTokens(lines[index - 1])) : '';
+        const next = index + 1 < lines.length ? this.cleanNameCandidate(this.stripTransactionTokens(lines[index + 1])) : '';
 
         if (this.isStrongMerchantName(current)) {
             if (this.looksLikeContinuation(next) && !this.lineHasAmount(lines[index + 1] || '')) {
@@ -305,6 +344,12 @@ class Scanner {
         if (current) return current;
         if (next && !this.lineHasAmount(lines[index + 1] || '')) return next;
         return '';
+    }
+
+    static stripTransactionTokens(line) {
+        return String(line || '')
+            .replace(this.amountTokenRegex(), ' ')
+            .replace(this.dateTokenRegex('g'), ' ');
     }
 
     static cleanNameCandidate(text) {
@@ -362,6 +407,43 @@ class Scanner {
         const month = String(parsed.getMonth() + 1).padStart(2, '0');
         const day = String(parsed.getDate()).padStart(2, '0');
         return `${parsed.getFullYear()}-${month}-${day}`;
+    }
+
+    static amountTokenRegex() {
+        return /[+\-]?\$?\s*\(?\d[\d,\s]*(?:[.]\d{2})\)?/g;
+    }
+
+    static dateTokenRegex(flags = '') {
+        return new RegExp(String.raw`\b(\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?|\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}|[A-Za-z]{3,9}\s\d{1,2}(?:,\s?\d{2,4})?)\b`, flags);
+    }
+
+    static shouldUsePdfOcr(textLines, transactions) {
+        if (transactions.length === 0) return true;
+
+        const datedCount = transactions.filter(tx => tx.date).length;
+        if (datedCount / transactions.length < 0.6) return true;
+
+        const tableSignals = this.countPdfTableSignals(textLines);
+
+        return tableSignals >= 2;
+    }
+
+    static shouldPreferPdfOcr(textLines, textTransactions, ocrTransactions) {
+        if (this.countPdfTableSignals(textLines) < 2 || ocrTransactions.length === 0) return false;
+        if (textTransactions.length === 0) return true;
+
+        const ocrDatedCount = ocrTransactions.filter(tx => tx.date).length;
+        const hasEnoughRows = ocrTransactions.length >= Math.max(1, Math.floor(textTransactions.length * 0.6));
+        const hasEnoughDates = ocrDatedCount >= Math.max(1, Math.floor(ocrTransactions.length * 0.6));
+
+        return hasEnoughRows && hasEnoughDates;
+    }
+
+    static countPdfTableSignals(textLines) {
+        return (textLines || []).filter(line => {
+            const lower = String(line || '').toLowerCase();
+            return lower.includes('balance') || this.extractAmountTokens(line).length >= 2;
+        }).length;
     }
 
     static async loadImageFile(file) {
