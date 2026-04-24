@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Spendlet</title>
-    <link rel="stylesheet" href="styles.css?v=2">
+    <link rel="stylesheet" href="styles.css?v=3">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Patrick+Hand&family=Short+Stack&display=swap" rel="stylesheet">
@@ -15,11 +15,11 @@
         window.pdfjsLib = pdfjsLib;
     </script>
 
-    <script src="services/CategoryService.js?v=2"></script>
-    <script src="services/StorageService.js?v=2"></script>
-    <script src="services/CategorizationEngine.js?v=2"></script>
-    <script src="components/Scanner.js?v=12"></script>
-    <script src="app.js?v=4"></script>
+    <script src="services/CategoryService.js?v=5"></script>
+    <script src="services/StorageService.js?v=4"></script>
+    <script src="services/CategorizationEngine.js?v=3"></script>
+    <script src="components/Scanner.js?v=14"></script>
+    <script src="app.js?v=10"></script>
 </head>
 <body>
     <div class="paper-app">
@@ -40,7 +40,7 @@
             <section id="overview" class="view-section active">
                 <div class="hero-card">
                     <div>
-                        <p class="summary-label">Balance</p>
+                        <p class="summary-label">All-time net</p>
                         <h2 class="summary-amount" id="total-balance">$0.00</h2>
                     </div>
                     <p class="helper-text compact">Tap a transaction to edit it.</p>
@@ -65,6 +65,7 @@
                     <div class="panel-header">
                         <div>
                             <h3>Monthly</h3>
+                            <p class="helper-text compact">Pie and cards show this month by category.</p>
                         </div>
                         <select id="month-select" class="form-input month-select"></select>
                     </div>
@@ -77,7 +78,7 @@
                     <ul id="category-summary-list" class="category-list"></ul>
                 </div>
 
-                <div class="panel">
+                <div class="panel" id="transactions-panel">
                     <div class="panel-header">
                         <div>
                             <h3>Transactions</h3>
@@ -90,6 +91,10 @@
                     <div id="transactions-panel-body">
                         <div class="transactions-tools">
                             <input type="search" id="transaction-search" class="form-input compact-input" placeholder="Search name or category">
+                            <div id="active-transaction-filter" class="active-filter-pill hidden">
+                                <span id="transaction-filter-label"></span>
+                                <button id="clear-transaction-filter" class="mini-text-btn" type="button">Clear</button>
+                            </div>
                         </div>
                         <div class="transaction-scroll">
                             <ul id="transaction-list" class="transaction-list"></ul>
@@ -165,6 +170,12 @@
                 <div class="panel">
                     <h3>Data</h3>
                     <p class="helper-text compact">Imports run in your browser. Missing dates stay blank so you can fill them in during review.</p>
+                    <div class="action-buttons">
+                        <button class="btn primary" id="export-backup">Export encrypted backup</button>
+                        <button class="btn secondary" id="import-backup">Import backup</button>
+                        <input type="file" id="backup-file-input" class="hidden" accept="application/json,.json">
+                    </div>
+                    <p id="backup-status" class="status-msg hidden"></p>
                     <div class="action-buttons">
                         <button class="btn secondary" id="clear-month-data">Clear selected month</button>
                         <button class="btn danger" id="clear-all-data">Delete all data</button>

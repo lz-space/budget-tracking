@@ -224,6 +224,26 @@ h3 {
   flex-wrap: wrap;
 }
 
+.active-filter-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 2px dashed var(--line-light);
+  border-radius: 999px;
+  padding: 5px 8px 5px 12px;
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+
+.mini-text-btn {
+  border: 0;
+  border-left: 2px dashed var(--line-light);
+  background: transparent;
+  color: var(--expense);
+  cursor: pointer;
+  padding: 0 4px 0 10px;
+}
+
 .transactions-header-actions {
   display: flex;
   align-items: center;
@@ -339,6 +359,42 @@ h3 {
   display: flex;
   flex-direction: column;
   gap: 7px;
+  transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+
+.cat-item[data-category] {
+  cursor: pointer;
+}
+
+.cat-item[data-category]:hover,
+.cat-item[data-category]:focus {
+  background: #fff4e8;
+  border-color: var(--line);
+  outline: none;
+  transform: translateY(-1px);
+}
+
+.cat-item.active-filter {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.cat-item.income-summary {
+  border-color: rgba(45, 122, 83, 0.7);
+  background: linear-gradient(180deg, #fffdf8 0%, rgba(45, 122, 83, 0.1) 100%);
+}
+
+.cat-item.income-summary.active-filter {
+  background: rgba(45, 122, 83, 0.18);
+  border-color: var(--income);
+}
+
+.income-summary .cat-val {
+  color: var(--income);
+}
+
+.expense-summary .cat-val {
+  color: var(--expense);
 }
 
 .cat-row-main,

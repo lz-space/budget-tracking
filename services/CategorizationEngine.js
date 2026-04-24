@@ -3,7 +3,7 @@ class CategorizationEngine {
 
     static baseRules = [
         { keywords: ['uber eats', 'doordash', 'door dash', 'grubhub', 'postmates'], category: 'Food & Drink', subCategory: 'Delivery' },
-        { keywords: ['whole foods', 'trader joe', 'trader joes', 'costco', 'aldi', 'kroger', 'publix', 'safeway', 'instacart'], category: 'Food & Drink', subCategory: 'Groceries' },
+        { keywords: ['whole foods', 'wholefds', 'trader joe', 'trader joes', 'costco', 'aldi', 'kroger', 'publix', 'safeway', 'instacart'], category: 'Food & Drink', subCategory: 'Groceries' },
         { keywords: ['starbucks', 'dunkin', 'blue bottle', 'cafe', 'coffee'], category: 'Food & Drink', subCategory: 'Coffee' },
         { keywords: ['restaurant', 'diner', 'chipotle', 'sweetgreen', 'mcdonald', 'shake shack', 'taco bell'], category: 'Food & Drink', subCategory: 'Restaurants' },
         { keywords: ['uber', 'lyft', 'taxi', 'rideshare'], category: 'Transport', subCategory: 'Rideshare' },

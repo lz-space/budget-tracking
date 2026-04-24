@@ -297,12 +297,14 @@ class Scanner {
     }
 
     static parsePositionedTransactionTableWithState(ocrData, initialDate = '') {
+        const positionedWords = this.extractPositionedWords(ocrData);
         const rows = this.extractOcrRows(ocrData);
         if (rows.length === 0) {
             return { transactions: [], lastActiveDate: initialDate || '', isTable: false };
         }
 
-        const columnHints = this.detectTransactionTableColumns(rows);
+        const allRows = this.groupWordsIntoRows(positionedWords);
+        const columnHints = this.detectTransactionTableColumns(allRows.length > rows.length ? allRows : rows);
         if (!columnHints) {
             return { transactions: [], lastActiveDate: initialDate || '', isTable: false };
         }
@@ -315,12 +317,13 @@ class Scanner {
             const line = this.normalizeText(row.text);
             if (!line || this.isTableHeaderOrSummaryLine(line)) return;
 
-            const dateMatch = line.match(dateRegex);
-            if (!dateMatch) return;
+            const dateMatch = this.getPositionedTableDateMatch(row, columnHints);
+            const hasStatusAnchor = this.hasPositionedStatusAnchor(row, columnHints);
+            if (!dateMatch && !hasStatusAnchor) return;
 
-            const lineDate = this.normalizeDate(dateMatch[0]);
-            if (!lineDate) return;
-            activeDate = lineDate;
+            const lineDate = dateMatch ? this.normalizeDate(dateMatch[0]) : '';
+            if (dateMatch && !lineDate) return;
+            if (lineDate) activeDate = lineDate;
 
             const moneyWords = this.extractMoneyWords(row.words);
             if (moneyWords.length === 0) return;
@@ -336,13 +339,16 @@ class Scanner {
                 return center > columnHints.descriptionStartX &&
                     center < Math.min(amountWord.x0 - 4, columnHints.descriptionEndX) &&
                     !dateRegex.test(word.text) &&
+                    !this.isStatusDatePlaceholder(word.text) &&
+                    !this.isRowActionNoise(word.text) &&
                     !this.extractAmountTokens(word.text).length;
             });
 
             const name = this.cleanNameCandidate(nameWords.map(word => word.text).join(' '));
             if (!this.isLikelyMerchantName(name)) return;
 
-            const categorized = CategorizationEngine.categorize(name, CategorizationEngine.guessType(name, amountWord.text));
+            const inferredType = this.guessTypeFromPositionedTableRow(row, amountWord, name, columnHints);
+            const categorized = CategorizationEngine.categorize(name, inferredType);
             transactions.push({
                 date: lineDate,
                 name,
@@ -364,46 +370,76 @@ class Scanner {
         const words = this.extractPositionedWords(ocrData);
         if (words.length === 0) return [];
 
-        const dateAnchoredRows = this.extractDateAnchoredRows(words);
-        if (dateAnchoredRows.length >= 3) {
-            return dateAnchoredRows;
+        const anchoredRows = this.extractTableAnchoredRows(words);
+        if (anchoredRows.length >= 3) {
+            return anchoredRows;
         }
 
         return this.groupWordsIntoRows(words);
     }
 
-    static extractDateAnchoredRows(words) {
+    static extractTableAnchoredRows(words) {
         const maxX = Math.max(...words.map(word => word.x1));
         const leftDateLimit = maxX * 0.32;
-        const dateRegex = this.dateTokenRegex();
-        const dateAnchors = [];
+        const rowAnchors = [];
 
         words
-            .filter(word => word.x0 <= leftDateLimit && dateRegex.test(word.text))
+            .filter(word => this.isTableRowAnchorWord(word, leftDateLimit))
             .sort((a, b) => a.y - b.y || a.x0 - b.x0)
             .forEach(word => {
-                const existing = dateAnchors.find(anchor => Math.abs(anchor.y - word.y) <= Math.max(8, word.height * 0.7));
+                const existing = rowAnchors.find(anchor => Math.abs(anchor.y - word.y) <= Math.max(8, word.height * 0.7));
                 if (existing) {
                     if (word.x0 < existing.x0) {
                         existing.x0 = word.x0;
                         existing.y = word.y;
                     }
                 } else {
-                    dateAnchors.push({ y: word.y, x0: word.x0 });
+                    rowAnchors.push({ y: word.y, x0: word.x0 });
                 }
             });
 
-        if (dateAnchors.length < 3) return [];
+        if (rowAnchors.length < 3) return [];
 
-        return dateAnchors.map((anchor, index) => {
-            const previous = dateAnchors[index - 1];
-            const next = dateAnchors[index + 1];
-            const top = previous ? (previous.y + anchor.y) / 2 : anchor.y - this.estimateRowHalfHeight(dateAnchors, index);
-            const bottom = next ? (anchor.y + next.y) / 2 : anchor.y + this.estimateRowHalfHeight(dateAnchors, index);
+        return rowAnchors.map((anchor, index) => {
+            const previous = rowAnchors[index - 1];
+            const next = rowAnchors[index + 1];
+            const top = previous ? (previous.y + anchor.y) / 2 : anchor.y - this.estimateRowHalfHeight(rowAnchors, index);
+            const bottom = next ? (anchor.y + next.y) / 2 : anchor.y + this.estimateRowHalfHeight(rowAnchors, index);
             const rowWords = words.filter(word => word.y >= top && word.y < bottom);
 
             return this.buildOcrRow(anchor.y, rowWords);
-        }).filter(row => row.text && this.dateTokenRegex().test(row.text));
+        }).filter(row => row.text && this.hasTableRowAnchor(row.text));
+    }
+
+    static isTableRowAnchorWord(word, leftLimit) {
+        if (word.x0 > leftLimit) return false;
+        return this.dateTokenRegex().test(word.text) || this.isStatusDatePlaceholder(word.text);
+    }
+
+    static hasTableRowAnchor(text) {
+        return this.dateTokenRegex().test(text) || this.hasStatusDatePlaceholder(text);
+    }
+
+    static hasStatusDatePlaceholder(text) {
+        return String(text || '').split(/\s+/).some(word => this.isStatusDatePlaceholder(word));
+    }
+
+    static isStatusDatePlaceholder(text) {
+        return /^(processing|pending)$/i.test(this.normalizeText(text));
+    }
+
+    static isRowActionNoise(text) {
+        return /^(view\/?edit|edit|view)$/i.test(this.normalizeText(text));
+    }
+
+    static getPositionedTableDateMatch(row, columnHints) {
+        const dateRegex = this.dateTokenRegex();
+        const dateWord = row.words.find(word => word.x0 < columnHints.descriptionStartX && dateRegex.test(word.text));
+        return dateWord ? dateWord.text.match(dateRegex) : null;
+    }
+
+    static hasPositionedStatusAnchor(row, columnHints) {
+        return row.words.some(word => word.x0 < columnHints.descriptionStartX && this.isStatusDatePlaceholder(word.text));
     }
 
     static estimateRowHalfHeight(anchors, index) {
@@ -492,8 +528,29 @@ class Scanner {
             amountX,
             balanceX,
             descriptionStartX,
-            descriptionEndX
+            descriptionEndX,
+            typeStartX: typeHeader ? typeHeader.x0 - 10 : descriptionEndX,
+            typeEndX: amountX - 20
         };
+    }
+
+    static guessTypeFromPositionedTableRow(row, amountWord, name, columnHints) {
+        const typeText = row.words
+            .filter(word => {
+                const center = this.wordCenterX(word);
+                return center >= columnHints.typeStartX &&
+                    center <= columnHints.typeEndX &&
+                    word.x1 < amountWord.x0 - 4 &&
+                    !this.isRowActionNoise(word.text);
+            })
+            .map(word => word.text)
+            .join(' ')
+            .toLowerCase();
+
+        if (/\b(credit|deposit|income|refund)\b/.test(typeText)) return 'income';
+        if (/\b(debit|charge|withdrawal|purchase|payment|fee)\b/.test(typeText)) return 'expense';
+
+        return CategorizationEngine.guessType(name, amountWord.text);
     }
 
     static extractMoneyWords(words) {
@@ -782,10 +839,15 @@ class Scanner {
     static cleanNameCandidate(text) {
         const cleaned = (text || '')
             .replace(/[\u25A0-\u25FF\u2600-\u27BF]/g, ' ')
+            .replace(/\b(?:trn|trace|auth|authorization|conf|confirmation|reference|ref|id)[:#]?\s*[xX\d.-]{3,}\b/gi, ' ')
+            .replace(/\b(?:confirmation#?|conf#?)\s*[xX\d.-]{3,}\b/gi, ' ')
+            .replace(/\b[xX]{3,}\d*\b/g, ' ')
+            .replace(/\b(?:trn|trace|auth|authorization|conf|confirmation|reference|ref|date|time|id)[:#]?\b/gi, ' ')
             .replace(/\b(pending|posted|complete|completed|debit|purchase|payment|online|transaction|card|tap|contactless|available|authorized)\b/gi, ' ')
             .replace(/\b(today|yesterday|details|view|merchant|statement|activity|balance|account|ending|total|subtotal|summary|transactions|history|search|filter)\b/gi, ' ')
             .replace(/\b\d{2}:\d{2}\b/g, ' ')
             .replace(/\b\d{4,}\b/g, ' ')
+            .replace(/[:#]+/g, ' ')
             .replace(/^[^A-Za-z0-9]+/g, ' ')
             .replace(/^[-:•.*]+/g, ' ')
             .replace(/\s{2,}/g, ' ')

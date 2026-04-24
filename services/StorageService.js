@@ -18,9 +18,8 @@ class StorageService {
             type: tx.type === 'income' ? 'income' : 'expense'
         };
 
-        const selection = CategoryService.validateSelection(tx.category, tx.subCategory);
-        normalized.category = selection.category;
-        normalized.subCategory = selection.subCategory;
+        normalized.category = CategoryService.sanitizeName(tx.category) || 'Other';
+        normalized.subCategory = CategoryService.sanitizeName(tx.subCategory) || 'General';
         return normalized;
     }
 

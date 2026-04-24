@@ -1,5 +1,6 @@
 class CategoryService {
     static TREE_KEY = 'privacy_budget_category_tree';
+    static DEFAULTS_MERGED_KEY = 'privacy_budget_default_categories_merged_v1';
 
     static defaultTree = {
         'Transport': ['Gas', 'Parking', 'Transit', 'Rideshare', 'Car Care', 'Other'],
@@ -19,11 +20,47 @@ class CategoryService {
 
     static getTree() {
         const stored = localStorage.getItem(this.TREE_KEY);
-        return stored ? JSON.parse(stored) : this.cloneDefaultTree();
+        if (!stored) return this.cloneDefaultTree();
+
+        const tree = JSON.parse(stored);
+        if (localStorage.getItem(this.DEFAULTS_MERGED_KEY)) {
+            return tree;
+        }
+
+        const mergedTree = this.mergeTrees(this.cloneDefaultTree(), tree);
+        this.saveTree(mergedTree);
+        return mergedTree;
     }
 
     static saveTree(tree) {
         localStorage.setItem(this.TREE_KEY, JSON.stringify(tree));
+        localStorage.setItem(this.DEFAULTS_MERGED_KEY, 'true');
+    }
+
+    static mergeTrees(baseTree, incomingTree) {
+        const merged = JSON.parse(JSON.stringify(baseTree || {}));
+
+        Object.entries(incomingTree || {}).forEach(([category, subcategories]) => {
+            const cleanCategory = this.sanitizeName(category);
+            if (!cleanCategory) return;
+
+            if (!merged[cleanCategory]) {
+                merged[cleanCategory] = [];
+            }
+
+            (Array.isArray(subcategories) ? subcategories : []).forEach(subcategory => {
+                const cleanSubcategory = this.sanitizeName(subcategory);
+                if (cleanSubcategory && !merged[cleanCategory].includes(cleanSubcategory)) {
+                    merged[cleanCategory].push(cleanSubcategory);
+                }
+            });
+
+            if (merged[cleanCategory].length === 0) {
+                merged[cleanCategory].push('General');
+            }
+        });
+
+        return merged;
     }
 
     static getPrimaryCategories() {
@@ -35,9 +72,67 @@ class CategoryService {
     }
 
     static ensureCategory(catName) {
+        const cleanName = this.sanitizeName(catName);
+        if (!cleanName) return;
+
         const tree = this.getTree();
-        if (!tree[catName]) {
-            tree[catName] = ['General'];
+        if (!tree[cleanName]) {
+            tree[cleanName] = ['General'];
+            this.saveTree(tree);
+        }
+    }
+
+    static ensureSelection(category, subCategory) {
+        const cleanCategory = this.sanitizeName(category) || 'Other';
+        const cleanSubCategory = this.sanitizeName(subCategory) || 'General';
+        const tree = this.getTree();
+
+        if (!tree[cleanCategory]) {
+            tree[cleanCategory] = [];
+        }
+
+        if (!tree[cleanCategory].includes(cleanSubCategory)) {
+            tree[cleanCategory].push(cleanSubCategory);
+        }
+
+        if (tree[cleanCategory].length === 0) {
+            tree[cleanCategory].push('General');
+        }
+
+        this.saveTree(tree);
+        return {
+            category: cleanCategory,
+            subCategory: cleanSubCategory
+        };
+    }
+
+    static ensureSelectionsFromTransactions(transactions) {
+        const tree = this.getTree();
+        let changed = false;
+
+        (transactions || []).forEach(transaction => {
+            const category = this.sanitizeName(transaction.category) || 'Other';
+            const subCategory = this.sanitizeName(transaction.subCategory) || 'General';
+
+            if (!tree[category]) {
+                tree[category] = [];
+                changed = true;
+            }
+
+            if (!tree[category].includes(subCategory)) {
+                tree[category].push(subCategory);
+                changed = true;
+            }
+        });
+
+        Object.keys(tree).forEach(category => {
+            if (tree[category].length === 0) {
+                tree[category].push('General');
+                changed = true;
+            }
+        });
+
+        if (changed) {
             this.saveTree(tree);
         }
     }

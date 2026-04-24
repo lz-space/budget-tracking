@@ -2,8 +2,11 @@ let pendingTransactions = [];
 let editingTransactionId = null;
 let currentMonthView = null;
 let transactionSearchTerm = '';
+let transactionCategoryFilter = null;
 
 const PIE_COLORS = ['#d67b44', '#2d7a53', '#5d8db8', '#b2574f', '#8c6db4', '#d1a84a', '#72825e', '#d98080'];
+const BACKUP_VERSION = 1;
+const BACKUP_KDF_ITERATIONS = 250000;
 
 document.addEventListener('DOMContentLoaded', () => {
     initApp();
@@ -25,19 +28,63 @@ function initApp() {
 function setupOverviewInteractions() {
     const toggleButton = document.getElementById('toggle-transactions');
     const panelBody = document.getElementById('transactions-panel-body');
+    const categoryList = document.getElementById('category-summary-list');
+    const clearFilterButton = document.getElementById('clear-transaction-filter');
 
     toggleButton.addEventListener('click', () => {
         const isCollapsed = panelBody.classList.toggle('collapsed');
         toggleButton.textContent = isCollapsed ? 'Expand' : 'Collapse';
         toggleButton.setAttribute('aria-expanded', String(!isCollapsed));
     });
+
+    categoryList.addEventListener('click', event => {
+        const categoryItem = event.target.closest('.cat-item[data-category]');
+        if (!categoryItem) return;
+
+        activateCategoryTransactionFilter(categoryItem.dataset.category, categoryItem.dataset.type || null);
+    });
+
+    categoryList.addEventListener('keydown', event => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        const categoryItem = event.target.closest('.cat-item[data-category]');
+        if (!categoryItem) return;
+
+        event.preventDefault();
+        activateCategoryTransactionFilter(categoryItem.dataset.category, categoryItem.dataset.type || null);
+    });
+
+    clearFilterButton.addEventListener('click', () => {
+        transactionCategoryFilter = null;
+        renderOverview();
+    });
+}
+
+function activateCategoryTransactionFilter(category, type = null) {
+    const toggleButton = document.getElementById('toggle-transactions');
+    const panelBody = document.getElementById('transactions-panel-body');
+
+    transactionCategoryFilter = {
+        category,
+        month: currentMonthView,
+        type
+    };
+    panelBody.classList.remove('collapsed');
+    toggleButton.textContent = 'Collapse';
+    toggleButton.setAttribute('aria-expanded', 'true');
+    renderOverview();
+    document.getElementById('transactions-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function renderAll() {
+    ensureSavedTransactionCategories();
     renderOverview();
     renderCategoryEditor();
     initializeManualForm();
     refreshPendingPreviewCategories();
+}
+
+function ensureSavedTransactionCategories() {
+    CategoryService.ensureSelectionsFromTransactions(StorageService.getTransactions());
 }
 
 function setupTabs() {
@@ -478,27 +525,56 @@ function renderDashboard() {
     const list = document.getElementById('transaction-list');
     const balanceElement = document.getElementById('total-balance');
     const countElement = document.getElementById('transaction-count');
+    const filterPill = document.getElementById('active-transaction-filter');
+    const filterLabel = document.getElementById('transaction-filter-label');
     const transactions = StorageService.getTransactions();
 
     list.innerHTML = '';
 
-    const totalBalance = transactions.reduce((sum, transaction) => {
-        return sum + (transaction.type === 'income' ? transaction.amount : -transaction.amount);
+    const totalBalanceCents = transactions.reduce((sum, transaction) => {
+        const amountCents = toCents(transaction.amount);
+        return sum + (transaction.type === 'income' ? amountCents : -amountCents);
     }, 0);
 
-    balanceElement.textContent = `${totalBalance < 0 ? '-' : ''}$${Math.abs(totalBalance).toFixed(2)}`;
-    balanceElement.className = `summary-amount ${totalBalance >= 0 ? 'positive' : 'negative'}`;
+    balanceElement.textContent = `${totalBalanceCents < 0 ? '-' : ''}${formatCents(totalBalanceCents)}`;
+    balanceElement.className = `summary-amount ${totalBalanceCents >= 0 ? 'positive' : 'negative'}`;
 
     const filteredTransactions = transactions.filter(transaction => {
+        const displayTransaction = getDisplayTransaction(transaction);
+        if (transactionCategoryFilter) {
+            const inSelectedMonth = transactionCategoryFilter.month
+                ? String(transaction.date || '').startsWith(transactionCategoryFilter.month)
+                : true;
+            const matchesType = transactionCategoryFilter.type
+                ? transaction.type === transactionCategoryFilter.type
+                : true;
+            if (!inSelectedMonth || !matchesType || displayTransaction.category !== transactionCategoryFilter.category) {
+                return false;
+            }
+        }
+
         if (!transactionSearchTerm) return true;
-        const haystack = `${transaction.name} ${transaction.category} ${transaction.subCategory}`.toLowerCase();
+        const haystack = `${transaction.name} ${displayTransaction.category} ${displayTransaction.subCategory}`.toLowerCase();
         return haystack.includes(transactionSearchTerm);
     });
 
     countElement.textContent = `${filteredTransactions.length} shown`;
+    if (transactionCategoryFilter) {
+        const typeLabel = transactionCategoryFilter.type === 'income' ? 'Income' : transactionCategoryFilter.type === 'expense' ? 'Expense' : 'All';
+        filterLabel.textContent = `${transactionCategoryFilter.category} · ${typeLabel} · ${formatMonthLabel(transactionCategoryFilter.month)}`;
+        filterPill.classList.remove('hidden');
+    } else {
+        filterPill.classList.add('hidden');
+    }
 
     if (filteredTransactions.length === 0) {
-        list.innerHTML = `<li class="tx-item"><div class="tx-left"><span class="tx-name">${transactions.length ? 'No matches' : 'No transactions yet'}</span><span class="tx-date">${transactions.length ? 'Try a different search.' : 'Go to Add to scan or enter your first transaction.'}</span></div></li>`;
+        const emptyTitle = transactions.length ? 'No matches' : 'No transactions yet';
+        const emptyHint = transactionCategoryFilter
+            ? 'Try another category or clear the filter.'
+            : transactions.length
+                ? 'Try a different search.'
+                : 'Go to Add to scan or enter your first transaction.';
+        list.innerHTML = `<li class="tx-item"><div class="tx-left"><span class="tx-name">${emptyTitle}</span><span class="tx-date">${emptyHint}</span></div></li>`;
         if (!transactions.length) {
             balanceElement.textContent = '$0.00';
             balanceElement.className = 'summary-amount';
@@ -507,13 +583,14 @@ function renderDashboard() {
     }
 
     filteredTransactions.forEach(transaction => {
+        const displayTransaction = getDisplayTransaction(transaction);
         const item = document.createElement('li');
         item.className = 'tx-item';
         item.innerHTML = `
             <div class="tx-left">
                 <span class="tx-name">${escapeHtml(transaction.name)}</span>
                 <span class="tx-date">${transaction.date}</span>
-                <span class="tx-cat">${escapeHtml(transaction.category)} / ${escapeHtml(transaction.subCategory)}</span>
+                <span class="tx-cat">${escapeHtml(displayTransaction.category)} / ${escapeHtml(displayTransaction.subCategory)}</span>
             </div>
             <div class="tx-amount ${transaction.type}">
                 ${transaction.type === 'income' ? '+' : '-'}$${transaction.amount.toFixed(2)}
@@ -527,7 +604,7 @@ function renderDashboard() {
 function renderMonthlySummary() {
     const transactions = StorageService.getTransactions();
     const monthSelect = document.getElementById('month-select');
-    const months = [...new Set(transactions.map(transaction => transaction.date.substring(0, 7)))].sort().reverse();
+    const months = [...new Set(transactions.map(transaction => getMonthKey(transaction.date)).filter(Boolean))].sort().reverse();
 
     if (months.length === 0) {
         monthSelect.innerHTML = '<option>No data</option>';
@@ -555,7 +632,11 @@ function renderMonthlySummary() {
         monthSelect.value = selectedMonth;
     }
 
-    monthSelect.onchange = () => updateMonthlyBreakdown(transactions, monthSelect.value);
+    monthSelect.onchange = () => {
+        transactionCategoryFilter = null;
+        updateMonthlyBreakdown(transactions, monthSelect.value);
+        renderDashboard();
+    };
     updateMonthlyBreakdown(transactions, selectedMonth);
 }
 
@@ -572,73 +653,175 @@ function updateMonthlyBreakdown(transactions, monthPrefix) {
     }
 
     currentMonthView = monthPrefix;
-    const monthTransactions = transactions.filter(transaction => transaction.date.startsWith(monthPrefix));
-    let incomeTotal = 0;
-    let expenseTotal = 0;
-    const categoryBuckets = {};
+    const monthTransactions = transactions
+        .filter(transaction => getMonthKey(transaction.date) === monthPrefix)
+        .map(transaction => getDisplayTransaction(transaction));
+    let incomeTotalCents = 0;
+    let expenseTotalCents = 0;
+    const expenseBuckets = Object.create(null);
+    const incomeBuckets = Object.create(null);
 
     monthTransactions.forEach(transaction => {
+        const amountCents = toCents(transaction.amount);
         if (transaction.type === 'income') {
-            incomeTotal += transaction.amount;
+            incomeTotalCents += amountCents;
+            addSummaryBucket(incomeBuckets, transaction, amountCents);
             return;
         }
 
-        expenseTotal += transaction.amount;
-        if (!categoryBuckets[transaction.category]) {
-            categoryBuckets[transaction.category] = { total: 0, subs: {} };
-        }
-        categoryBuckets[transaction.category].total += transaction.amount;
-        categoryBuckets[transaction.category].subs[transaction.subCategory] =
-            (categoryBuckets[transaction.category].subs[transaction.subCategory] || 0) + transaction.amount;
+        expenseTotalCents += amountCents;
+        addSummaryBucket(expenseBuckets, transaction, amountCents);
     });
 
-    document.getElementById('month-income').textContent = `+$${incomeTotal.toFixed(2)}`;
-    document.getElementById('month-expense').textContent = `-$${expenseTotal.toFixed(2)}`;
+    document.getElementById('month-income').textContent = `+${formatCents(incomeTotalCents)}`;
+    document.getElementById('month-expense').textContent = `-${formatCents(expenseTotalCents)}`;
 
-    const net = incomeTotal - expenseTotal;
+    const netCents = incomeTotalCents - expenseTotalCents;
     const netElement = document.getElementById('month-net');
-    netElement.textContent = `${net < 0 ? '-' : '+'}$${Math.abs(net).toFixed(2)}`;
-    netElement.style.color = net >= 0 ? 'var(--income)' : 'var(--expense)';
+    netElement.textContent = `${netCents < 0 ? '-' : '+'}${formatCents(netCents)}`;
+    netElement.style.color = netCents >= 0 ? 'var(--income)' : 'var(--expense)';
 
-    const sortedCategories = Object.entries(categoryBuckets).sort((left, right) => right[1].total - left[1].total);
+    const sortedExpenses = Object.entries(expenseBuckets).sort((left, right) => right[1].totalCents - left[1].totalCents);
+    const sortedIncome = Object.entries(incomeBuckets).sort((left, right) => right[1].totalCents - left[1].totalCents);
     categoryList.innerHTML = '';
 
-    if (sortedCategories.length === 0) {
-        categoryList.innerHTML = '<li class="cat-item">No expenses in this month.</li>';
+    if (sortedExpenses.length === 0 && sortedIncome.length === 0) {
+        categoryList.innerHTML = '<li class="cat-item">No transactions in this month.</li>';
         drawMonthlyPieChart([]);
         return;
     }
 
-    drawMonthlyPieChart(sortedCategories.map(([category, data], index) => ({
-        label: category,
-        value: data.total,
-        color: PIE_COLORS[index % PIE_COLORS.length]
-    })));
+    const pieSlices = [
+        ...sortedExpenses.map(([category, data], index) => ({
+            label: category,
+            value: data.totalCents,
+            color: PIE_COLORS[index % PIE_COLORS.length]
+        })),
+        ...sortedIncome.map(([category, data]) => ({
+            label: `${category} income`,
+            value: data.totalCents,
+            color: 'var(--income)'
+        }))
+    ];
 
-    sortedCategories.forEach(([category, data], index) => {
-        const item = document.createElement('li');
-        item.className = 'cat-item';
+    drawMonthlyPieChart(pieSlices);
 
-        const subBreakdown = Object.entries(data.subs)
-            .sort((left, right) => right[1] - left[1])
-            .map(([subCategory, amount]) => `
-                <div class="sub-cat-chip">
-                    <span>${escapeHtml(subCategory)}</span>
-                    <span>$${amount.toFixed(2)}</span>
-                </div>
-            `)
-            .join('');
+    sortedExpenses.forEach(([category, data], index) => {
+        categoryList.appendChild(buildSummaryCategoryItem({
+            category,
+            data,
+            index,
+            totalCents: expenseTotalCents,
+            type: 'expense',
+            color: PIE_COLORS[index % PIE_COLORS.length]
+        }));
+    });
 
-        item.innerHTML = `
-            <div class="cat-row-main">
-                <span class="category-pill"><span style="display:inline-block;width:12px;height:12px;border-radius:999px;background:${PIE_COLORS[index % PIE_COLORS.length]};border:2px solid var(--line);"></span>${((data.total / expenseTotal) * 100).toFixed(0)}%</span>
-                <span class="cat-name">${escapeHtml(category)}</span>
-                <span class="cat-val">-$${data.total.toFixed(2)}</span>
+    sortedIncome.forEach(([category, data], index) => {
+        categoryList.appendChild(buildSummaryCategoryItem({
+            category,
+            data,
+            index,
+            totalCents: incomeTotalCents,
+            type: 'income',
+            color: 'var(--income)'
+        }));
+    });
+}
+
+function addSummaryBucket(buckets, transaction, amountCents) {
+    const category = transaction.category || 'Other';
+    const subCategory = transaction.subCategory || 'General';
+
+    if (!buckets[category]) {
+        buckets[category] = { totalCents: 0, subs: Object.create(null) };
+    }
+
+    buckets[category].totalCents += amountCents;
+    buckets[category].subs[subCategory] = (buckets[category].subs[subCategory] || 0) + amountCents;
+}
+
+function getDisplayTransaction(transaction) {
+    const category = CategoryService.sanitizeName(transaction.category) || 'Other';
+    const subCategory = CategoryService.sanitizeName(transaction.subCategory) || 'General';
+    const isGenericCategory = category === 'Other' && subCategory === 'General';
+
+    if (!isGenericCategory || !transaction.name) {
+        return { ...transaction, category, subCategory };
+    }
+
+    const guess = CategorizationEngine.categorize(transaction.name, transaction.type);
+    if (!guess || !guess.c || guess.c === 'Other') {
+        return { ...transaction, category, subCategory };
+    }
+
+    return {
+        ...transaction,
+        category: guess.c,
+        subCategory: guess.s || CategoryService.getFirstSubOrDefault(guess.c)
+    };
+}
+
+function buildSummaryCategoryItem({ category, data, index, totalCents, type, color }) {
+    const item = document.createElement('li');
+    item.className = `cat-item ${type === 'income' ? 'income-summary' : 'expense-summary'}`;
+    item.dataset.category = category;
+    item.dataset.type = type;
+    item.setAttribute('role', 'button');
+    item.tabIndex = 0;
+    if (
+        transactionCategoryFilter &&
+        transactionCategoryFilter.category === category &&
+        transactionCategoryFilter.month === currentMonthView &&
+        transactionCategoryFilter.type === type
+    ) {
+        item.classList.add('active-filter');
+    }
+
+    const subBreakdown = Object.entries(data.subs)
+        .sort((left, right) => right[1] - left[1])
+        .map(([subCategory, amountCents]) => `
+            <div class="sub-cat-chip">
+                <span>${escapeHtml(subCategory)}</span>
+                <span>${formatCents(amountCents)}</span>
             </div>
-            <div class="cat-subs-list">${subBreakdown}</div>
-        `;
+        `)
+        .join('');
+    const percentage = totalCents > 0 ? `${Math.round((data.totalCents / totalCents) * 100)}%` : '0%';
+    const amountPrefix = type === 'income' ? '+' : '-';
+    const typeLabel = type === 'income' ? 'Income' : percentage;
 
-        categoryList.appendChild(item);
+    item.innerHTML = `
+        <div class="cat-row-main">
+            <span class="category-pill"><span style="display:inline-block;width:12px;height:12px;border-radius:999px;background:${color};border:2px solid var(--line);"></span>${typeLabel}</span>
+            <span class="cat-name">${escapeHtml(category)}</span>
+            <span class="cat-val">${amountPrefix}${formatCents(data.totalCents)}</span>
+        </div>
+        <div class="cat-subs-list">${subBreakdown}</div>
+    `;
+
+    return item;
+}
+
+function toCents(amount) {
+    return Math.round((Number(amount) || 0) * 100);
+}
+
+function formatCents(cents) {
+    return `$${(Math.abs(Number(cents) || 0) / 100).toFixed(2)}`;
+}
+
+function getMonthKey(dateValue) {
+    const value = String(dateValue || '');
+    return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value.substring(0, 7) : '';
+}
+
+function formatMonthLabel(monthPrefix) {
+    if (!monthPrefix || !monthPrefix.includes('-')) return 'All months';
+    const [year, month] = monthPrefix.split('-');
+    return new Date(Number(year), Number(month) - 1).toLocaleString('default', {
+        month: 'short',
+        year: 'numeric'
     });
 }
 
@@ -770,6 +953,7 @@ function setupCategoryListeners() {
 }
 
 function renderCategoryEditor() {
+    ensureSavedTransactionCategories();
     const container = document.getElementById('settings-tree-container');
     const tree = CategoryService.getTree();
     container.innerHTML = '';
@@ -829,6 +1013,17 @@ function buildMobileScanHelp() {
 }
 
 function setupDataManagementListeners() {
+    document.getElementById('export-backup').addEventListener('click', exportEncryptedBackup);
+    document.getElementById('import-backup').addEventListener('click', () => {
+        document.getElementById('backup-file-input').click();
+    });
+    document.getElementById('backup-file-input').addEventListener('change', async event => {
+        const file = event.target.files?.[0];
+        event.target.value = '';
+        if (!file) return;
+        await importEncryptedBackup(file);
+    });
+
     document.getElementById('clear-month-data').addEventListener('click', () => {
         const selectedMonth = document.getElementById('month-select')?.value || currentMonthView;
         if (!selectedMonth || selectedMonth === 'No data') return;
@@ -858,6 +1053,235 @@ function setupDataManagementListeners() {
         StorageService.clearAll();
         renderAll();
     });
+}
+
+async function exportEncryptedBackup() {
+    if (!window.crypto?.subtle) {
+        alert('Encrypted backup needs a secure browser context. Try opening Spendlet over HTTPS.');
+        return;
+    }
+
+    const password = promptForBackupPassword(true);
+    if (!password) return;
+
+    try {
+        setBackupStatus('Creating encrypted backup...');
+        const payload = buildBackupPayload();
+        const encrypted = await encryptBackupPayload(payload, password);
+        downloadBackupFile(encrypted);
+        setBackupStatus('Encrypted backup downloaded.');
+    } catch (error) {
+        console.error(error);
+        setBackupStatus('Could not create backup.');
+        alert('Could not create the encrypted backup. Please try again.');
+    }
+}
+
+async function importEncryptedBackup(file) {
+    if (!window.crypto?.subtle) {
+        alert('Encrypted import needs a secure browser context. Try opening Spendlet over HTTPS.');
+        return;
+    }
+
+    const password = promptForBackupPassword(false);
+    if (!password) return;
+
+    try {
+        setBackupStatus('Decrypting backup...');
+        const encrypted = JSON.parse(await file.text());
+        const payload = await decryptBackupPayload(encrypted, password);
+        const importData = normalizeBackupPayload(payload);
+
+        mergeBackupCategoryTree(importData.categoryTree);
+        mergeBackupRules(importData.customRules);
+
+        const importedTransactions = prepareBackupTransactionsForReview(importData.transactions);
+        renderAll();
+
+        if (importedTransactions.length === 0) {
+            setBackupStatus('Backup opened. No transactions were found.');
+            alert('Backup opened, but no transactions were found.');
+            return;
+        }
+
+        const duplicateCount = Object.keys(detectDuplicateWarnings(importedTransactions)).length;
+        document.querySelector('[data-target="import"]').click();
+        showPreview(importedTransactions);
+        setBackupStatus(`Backup opened: ${importedTransactions.length} transactions ready to review.`);
+        alert(`Backup opened. ${importedTransactions.length} transactions are in Review.${duplicateCount ? ` ${duplicateCount} possible duplicates are marked.` : ''} Nothing was automatically deleted or skipped.`);
+    } catch (error) {
+        console.error(error);
+        setBackupStatus('Could not import backup.');
+        alert('Could not open this backup. Check the file and password.');
+    }
+}
+
+function buildBackupPayload() {
+    return {
+        app: 'Spendlet',
+        version: BACKUP_VERSION,
+        exportedAt: new Date().toISOString(),
+        transactions: StorageService.getTransactions(),
+        categoryTree: CategoryService.getTree(),
+        customRules: CategorizationEngine.getCustomRules()
+    };
+}
+
+function normalizeBackupPayload(payload) {
+    if (!payload || typeof payload !== 'object') {
+        throw new Error('Backup payload is missing.');
+    }
+
+    return {
+        transactions: Array.isArray(payload.transactions) ? payload.transactions : [],
+        categoryTree: payload.categoryTree && typeof payload.categoryTree === 'object' ? payload.categoryTree : {},
+        customRules: payload.customRules && typeof payload.customRules === 'object' ? payload.customRules : {}
+    };
+}
+
+async function encryptBackupPayload(payload, password) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await deriveBackupKey(password, salt);
+    const encoded = new TextEncoder().encode(JSON.stringify(payload));
+    const cipherText = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoded);
+
+    return {
+        app: 'Spendlet',
+        kind: 'encrypted-backup',
+        version: BACKUP_VERSION,
+        kdf: 'PBKDF2-SHA-256',
+        iterations: BACKUP_KDF_ITERATIONS,
+        cipher: 'AES-GCM',
+        createdAt: new Date().toISOString(),
+        salt: arrayBufferToBase64(salt),
+        iv: arrayBufferToBase64(iv),
+        data: arrayBufferToBase64(cipherText)
+    };
+}
+
+async function decryptBackupPayload(encrypted, password) {
+    if (!encrypted || encrypted.kind !== 'encrypted-backup' || !encrypted.salt || !encrypted.iv || !encrypted.data) {
+        throw new Error('Not a Spendlet encrypted backup.');
+    }
+
+    const salt = base64ToUint8Array(encrypted.salt);
+    const iv = base64ToUint8Array(encrypted.iv);
+    const cipherText = base64ToUint8Array(encrypted.data);
+    const key = await deriveBackupKey(password, salt, encrypted.iterations || BACKUP_KDF_ITERATIONS);
+    const plainText = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, cipherText);
+    return JSON.parse(new TextDecoder().decode(plainText));
+}
+
+async function deriveBackupKey(password, salt, iterations = BACKUP_KDF_ITERATIONS) {
+    const passwordKey = await crypto.subtle.importKey(
+        'raw',
+        new TextEncoder().encode(password),
+        'PBKDF2',
+        false,
+        ['deriveKey']
+    );
+
+    return crypto.subtle.deriveKey(
+        { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' },
+        passwordKey,
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['encrypt', 'decrypt']
+    );
+}
+
+function mergeBackupCategoryTree(importedTree) {
+    const currentTree = CategoryService.getTree();
+    const mergedTree = { ...currentTree };
+
+    Object.entries(importedTree || {}).forEach(([category, subcategories]) => {
+        if (!Array.isArray(subcategories)) return;
+        if (!mergedTree[category]) {
+            mergedTree[category] = [];
+        }
+
+        subcategories.forEach(subcategory => {
+            const cleanSubcategory = CategoryService.sanitizeName(subcategory);
+            if (cleanSubcategory && !mergedTree[category].includes(cleanSubcategory)) {
+                mergedTree[category].push(cleanSubcategory);
+            }
+        });
+
+        if (mergedTree[category].length === 0) {
+            mergedTree[category].push('General');
+        }
+    });
+
+    CategoryService.saveTree(mergedTree);
+}
+
+function mergeBackupRules(importedRules) {
+    const currentRules = CategorizationEngine.getCustomRules();
+    CategorizationEngine.saveCustomRules({ ...currentRules, ...(importedRules || {}) });
+}
+
+function prepareBackupTransactionsForReview(transactions) {
+    const currentIds = new Set(StorageService.getTransactions().map(transaction => transaction.id));
+
+    return transactions.map(transaction => {
+        const normalized = StorageService.normalizeTransaction(transaction);
+        if (currentIds.has(normalized.id)) {
+            delete normalized.id;
+        }
+        return normalized;
+    });
+}
+
+function promptForBackupPassword(isExport) {
+    const password = prompt(isExport ? 'Create a backup password. Spendlet cannot recover it if forgotten.' : 'Enter the backup password.');
+    if (!password) return '';
+
+    if (isExport) {
+        const repeatedPassword = prompt('Type the backup password again.');
+        if (password !== repeatedPassword) {
+            alert('Backup passwords did not match.');
+            return '';
+        }
+    }
+
+    return password;
+}
+
+function downloadBackupFile(encryptedPayload) {
+    const blob = new Blob([JSON.stringify(encryptedPayload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `spendlet-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+}
+
+function arrayBufferToBase64(buffer) {
+    const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+    let binary = '';
+    bytes.forEach(byte => {
+        binary += String.fromCharCode(byte);
+    });
+    return btoa(binary);
+}
+
+function base64ToUint8Array(value) {
+    const binary = atob(value);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+        bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes;
+}
+
+function setBackupStatus(message) {
+    const status = document.getElementById('backup-status');
+    status.textContent = message;
+    status.classList.toggle('hidden', !message);
 }
 
 function syncTransactionsAfterPrimaryRename(oldName, newName) {
