@@ -1,6 +1,6 @@
 class Scanner {
     static MAX_IMAGE_DIMENSION = 1800;
-    static PDF_RENDER_SCALE = 2;
+    static PDF_RENDER_SCALE = 3;
     static NON_TRANSACTION_TERMS = [
         'balance', 'available', 'account', 'statement', 'activity', 'ending',
         'routing', 'member fdic', 'search', 'filter', 'deposit account',
@@ -103,18 +103,7 @@ class Scanner {
             activeDate = parsed.lastActiveDate;
 
             if (this.shouldUsePdfOcr(textLines, transactions)) {
-                const viewport = page.getViewport({ scale: this.PDF_RENDER_SCALE });
-                const canvas = document.createElement('canvas');
-                canvas.width = Math.ceil(viewport.width);
-                canvas.height = Math.ceil(viewport.height);
-                const context = canvas.getContext('2d', { willReadFrequently: true });
-                await page.render({ canvasContext: context, viewport }).promise;
-
-                const prepared = this.prepareCanvasForOCR(canvas, { mode: 'balanced' });
-                const ocrText = await this.runOcrOnCanvas(prepared, progress => {
-                    statusCallback(`Scanning PDF ${fileNumber}/${totalFiles}, page ${pageNumber}/${pdf.numPages}... ${progress}%`);
-                });
-                parsed = this.parseTextWithState(ocrText, activeDate);
+                parsed = await this.scanPdfPageWithOcrVariants(page, activeDate, statusCallback, fileNumber, totalFiles, pageNumber, pdf.numPages);
                 if (
                     this.shouldPreferPdfOcr(textLines, transactions, parsed.transactions) ||
                     this.scoreParseResult(parsed.transactions) > this.scoreParseResult(transactions)
@@ -128,6 +117,50 @@ class Scanner {
         }
 
         return allTransactions;
+    }
+
+    static async scanPdfPageWithOcrVariants(page, activeDate, statusCallback, fileNumber, totalFiles, pageNumber, pageCount) {
+        const variants = [
+            { label: 'balanced', scale: this.PDF_RENDER_SCALE, mode: 'balanced' },
+            { label: 'high contrast', scale: this.PDF_RENDER_SCALE, mode: 'contrast' },
+            { label: 'plain render', scale: this.PDF_RENDER_SCALE, mode: 'none' },
+            { label: 'smaller render', scale: 2, mode: 'balanced' }
+        ];
+        let bestParsed = { transactions: [], lastActiveDate: activeDate };
+        let bestScore = -Infinity;
+
+        for (const variant of variants) {
+            const canvas = await this.renderPdfPageToCanvas(page, variant.scale);
+            const prepared = this.prepareCanvasForOCR(canvas, { mode: variant.mode });
+            const ocrData = await this.runOcrDataOnCanvas(prepared, progress => {
+                statusCallback(`Scanning PDF ${fileNumber}/${totalFiles}, page ${pageNumber}/${pageCount} (${variant.label})... ${progress}%`);
+            });
+            const parsed = this.parsePdfOcrDataWithState(ocrData, activeDate);
+            const score = this.scoreParseResult(parsed.transactions);
+
+            if (score > bestScore) {
+                bestScore = score;
+                bestParsed = parsed;
+            }
+
+            if (parsed.transactions.length >= 5 && parsed.transactions.filter(tx => tx.date).length >= 3) {
+                break;
+            }
+        }
+
+        return bestParsed;
+    }
+
+    static async renderPdfPageToCanvas(page, scale) {
+        const viewport = page.getViewport({ scale });
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.ceil(viewport.width);
+        canvas.height = Math.ceil(viewport.height);
+        const context = canvas.getContext('2d', { willReadFrequently: true });
+        context.fillStyle = '#ffffff';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        await page.render({ canvasContext: context, viewport }).promise;
+        return canvas;
     }
 
     static async extractPdfTextLines(page) {
@@ -176,6 +209,63 @@ class Scanner {
         return this.parseLinesWithState(this.prepareLines(rawText), initialDate);
     }
 
+    static parsePdfOcrDataWithState(ocrData, initialDate = '') {
+        const positionedLines = this.extractOcrPositionedLines(ocrData);
+        if (positionedLines.length > 0) {
+            const parsed = this.parseLinesWithState(positionedLines, initialDate);
+            if (parsed.transactions.length > 0) {
+                return parsed;
+            }
+        }
+
+        return this.parseTextWithState((ocrData && ocrData.text) || '', initialDate);
+    }
+
+    static extractOcrPositionedLines(ocrData) {
+        const words = ((ocrData && ocrData.words) || [])
+            .map(word => {
+                const bbox = word.bbox || {};
+                const text = this.normalizeText(word.text || '');
+                const y0 = Number(bbox.y0);
+                const y1 = Number(bbox.y1);
+                const x0 = Number(bbox.x0);
+                const x1 = Number(bbox.x1);
+
+                return {
+                    text,
+                    x0,
+                    x1,
+                    y: Number.isFinite(y0) && Number.isFinite(y1) ? (y0 + y1) / 2 : NaN,
+                    height: Number.isFinite(y0) && Number.isFinite(y1) ? Math.max(1, y1 - y0) : 12
+                };
+            })
+            .filter(word => word.text && Number.isFinite(word.x0) && Number.isFinite(word.y));
+
+        if (words.length === 0) return [];
+
+        const averageHeight = words.reduce((sum, word) => sum + word.height, 0) / words.length;
+        const rowTolerance = Math.max(8, averageHeight * 0.55);
+        const rows = [];
+
+        words
+            .sort((a, b) => a.y - b.y || a.x0 - b.x0)
+            .forEach(word => {
+                const row = rows.find(candidate => Math.abs(candidate.y - word.y) <= rowTolerance);
+                if (row) {
+                    row.words.push(word);
+                    row.y = (row.y * (row.words.length - 1) + word.y) / row.words.length;
+                } else {
+                    rows.push({ y: word.y, words: [word] });
+                }
+            });
+
+        return rows
+            .sort((a, b) => a.y - b.y)
+            .map(row => row.words.sort((a, b) => a.x0 - b.x0).map(word => word.text).join(' '))
+            .map(line => this.normalizeText(line))
+            .filter(Boolean);
+    }
+
     static parseLinesWithState(lines, initialDate = '') {
         const transactions = [];
         const dateRegex = this.dateTokenRegex();
@@ -192,6 +282,10 @@ class Scanner {
 
             if (lineDate && !this.lineHasAmount(normalizedLine)) {
                 activeDate = lineDate;
+                return;
+            }
+
+            if (!lineDate && this.isLikelyBalanceCarryoverLine(lines, index, normalizedLine, dateRegex)) {
                 return;
             }
 
@@ -237,6 +331,7 @@ class Scanner {
         return (text || '')
             .replace(/\u00a0/g, ' ')
             .replace(/\u2212/g, '-')
+            .replace(/[\u2013\u2014]/g, '-')
             .replace(/[|]/g, ' ')
             .replace(/[Oo](?=\d{2}\b)/g, '0')
             .replace(/(?<=\d)[oO](?=\d)/g, '0')
@@ -342,8 +437,37 @@ class Scanner {
         }
 
         if (current) return current;
+        if (next && this.isLikelyBalanceMerchantLine(lines[index + 1] || '', next)) return next;
         if (next && !this.lineHasAmount(lines[index + 1] || '')) return next;
         return '';
+    }
+
+    static isLikelyBalanceCarryoverLine(lines, index, normalizedLine, dateRegex) {
+        if (index <= 0 || !this.lineHasAmount(normalizedLine)) return false;
+
+        const previousLine = this.normalizeText(lines[index - 1] || '');
+        const previousDate = previousLine.match(dateRegex);
+        if (!previousDate || !this.lineHasAmount(previousLine)) return false;
+
+        const previousName = this.cleanNameCandidate(this.stripTransactionTokens(previousLine));
+        if (this.isStrongMerchantName(previousName)) return false;
+
+        const currentName = this.cleanNameCandidate(this.stripTransactionTokens(normalizedLine));
+        return this.isLikelyBalanceMerchantLine(normalizedLine, currentName);
+    }
+
+    static isLikelyBalanceMerchantLine(line, merchantName) {
+        if (!merchantName || !this.isStrongMerchantName(merchantName)) return false;
+
+        const normalizedLine = this.normalizeText(line);
+        if (this.dateTokenRegex().test(normalizedLine)) return false;
+
+        const amountTokens = this.extractAmountTokens(normalizedLine);
+        if (amountTokens.length !== 1) return false;
+
+        const amountIndex = amountTokens[0].index;
+        const beforeAmount = this.cleanNameCandidate(normalizedLine.slice(0, amountIndex));
+        return amountIndex > 0 && this.isStrongMerchantName(beforeAmount);
     }
 
     static stripTransactionTokens(line) {
@@ -355,7 +479,7 @@ class Scanner {
     static cleanNameCandidate(text) {
         const cleaned = (text || '')
             .replace(/[\u25A0-\u25FF\u2600-\u27BF]/g, ' ')
-            .replace(/\b(pending|posted|complete|completed|debit|credit|purchase|payment|online|transaction|card|tap|contactless|available|authorized)\b/gi, ' ')
+            .replace(/\b(pending|posted|complete|completed|debit|purchase|payment|online|transaction|card|tap|contactless|available|authorized)\b/gi, ' ')
             .replace(/\b(today|yesterday|details|view|merchant|statement|activity|balance|account|ending|total|subtotal|summary|transactions|history|search|filter)\b/gi, ' ')
             .replace(/\b\d{2}:\d{2}\b/g, ' ')
             .replace(/\b\d{4,}\b/g, ' ')
@@ -370,6 +494,8 @@ class Scanner {
     static isLikelyMerchantName(name) {
         if (!name) return false;
         const lower = name.toLowerCase();
+        if (/\b(des|indn|id)\s*:/i.test(name)) return false;
+        if (/\bxxxxx+\d*\b/i.test(name)) return false;
         if (this.NON_TRANSACTION_TERMS.some(term => lower.includes(term))) return false;
 
         const alphaCount = (name.match(/[A-Za-z]/g) || []).length;
@@ -410,7 +536,7 @@ class Scanner {
     }
 
     static amountTokenRegex() {
-        return /[+\-]?\$?\s*\(?\d[\d,\s]*(?:[.]\d{2})\)?/g;
+        return /[+\-]?\$?\s*\(?\d{1,3}(?:,\d{3})*(?:[.]\d{2})\)?|[+\-]?\$?\s*\(?\d+(?:[.]\d{2})\)?/g;
     }
 
     static dateTokenRegex(flags = '') {
@@ -499,10 +625,19 @@ class Scanner {
         const data = imageData.data;
 
         for (let i = 0; i < data.length; i += 4) {
+            if (data[i + 3] === 0) {
+                data[i] = 255;
+                data[i + 1] = 255;
+                data[i + 2] = 255;
+                data[i + 3] = 255;
+            }
+
             const grayscale = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
             let nextValue = grayscale;
 
-            if (options.mode === 'contrast') {
+            if (options.mode === 'none') {
+                nextValue = grayscale;
+            } else if (options.mode === 'contrast') {
                 nextValue = grayscale > 165 ? 255 : grayscale < 135 ? 0 : grayscale;
             } else {
                 nextValue = grayscale > 190 ? 255 : grayscale < 100 ? 0 : grayscale;
@@ -518,6 +653,11 @@ class Scanner {
     }
 
     static async runOcrOnCanvas(canvas, progressCallback) {
+        const data = await this.runOcrDataOnCanvas(canvas, progressCallback);
+        return data.text || '';
+    }
+
+    static async runOcrDataOnCanvas(canvas, progressCallback) {
         const result = await Tesseract.recognize(canvas, 'eng', {
             logger: message => {
                 if (message.status === 'recognizing text' && progressCallback) {
@@ -526,7 +666,7 @@ class Scanner {
             }
         });
 
-        return result.data.text || '';
+        return result.data || {};
     }
 
     static scoreParseResult(transactions) {
