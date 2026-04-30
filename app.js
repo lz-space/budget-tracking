@@ -354,7 +354,10 @@ function readTransactionFromRow(row, draft) {
         amount: parseFloat(row.querySelector('.tx-edit-amount').value) || 0,
         type: row.querySelector('.tx-edit-type').value,
         category: selection.category,
-        subCategory: selection.subCategory
+        subCategory: selection.subCategory,
+        scanBalanceAfter: draft.scanBalanceAfter,
+        scanBalanceMatched: draft.scanBalanceMatched,
+        scanWarning: draft.scanWarning
     };
 }
 
@@ -383,12 +386,14 @@ function showPreview(transactions) {
 
     transactions.forEach((transaction, index) => {
         const hint = duplicateHints[index];
+        const scanHint = buildScanReviewHint(transaction);
         const row = document.createElement('div');
         row.className = 'editable-tx-row';
         row.dataset.index = String(index);
         row.innerHTML = `
             <div class="preview-row-head">
                 <div class="preview-hints">
+                    ${scanHint ? `<span class="duplicate-pill ${scanHint.level}">${escapeHtml(scanHint.label)}</span>` : ''}
                     ${hint ? `<span class="duplicate-pill ${hint.level}">${escapeHtml(hint.label)}</span>` : ''}
                 </div>
                 <button class="btn danger mini-btn remove-preview-btn" type="button" data-index="${index}">Remove</button>
@@ -408,6 +413,7 @@ function showPreview(transactions) {
                 <select class="form-input tx-edit-category"></select>
                 <select class="form-input tx-edit-subcat"></select>
             </div>
+            ${scanHint ? `<p class="preview-note">${escapeHtml(scanHint.message)}</p>` : ''}
             ${hint ? `<p class="preview-note">${escapeHtml(hint.message)}</p>` : ''}
         `;
 
@@ -424,6 +430,39 @@ function showPreview(transactions) {
     });
 
     previewArea.classList.remove('hidden');
+}
+
+function buildScanReviewHint(transaction) {
+    if (transaction.scanWarning) {
+        return {
+            level: 'strong',
+            label: 'Review amount',
+            message: transaction.scanWarning
+        };
+    }
+
+    if (transaction.scanBalanceMatched && Number.isFinite(transaction.scanBalanceAfter)) {
+        return {
+            level: 'soft',
+            label: 'Balance checked',
+            message: `Amount matches the running balance ending at ${formatReviewMoney(transaction.scanBalanceAfter)}.`
+        };
+    }
+
+    if (Number.isFinite(transaction.scanBalanceAfter)) {
+        return {
+            level: 'soft',
+            label: 'Balance seen',
+            message: `Running balance shown after this transaction: ${formatReviewMoney(transaction.scanBalanceAfter)}.`
+        };
+    }
+
+    return null;
+}
+
+function formatReviewMoney(value) {
+    const amount = Math.round((Number(value) || 0) * 100) / 100;
+    return `${amount < 0 ? '-' : ''}$${Math.abs(amount).toFixed(2)}`;
 }
 
 function refreshPendingPreviewCategories() {

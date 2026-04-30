@@ -217,8 +217,19 @@ class Scanner {
     }
 
     static parseImageOcrDataWithState(ocrData, initialDate = '') {
+        const mobileParsed = this.parsePositionedMobileTransactionListWithState(ocrData, initialDate);
         const positionedTable = this.parsePositionedTransactionTableWithState(ocrData, initialDate);
         const textParsed = this.parseTextWithState((ocrData && ocrData.text) || '', initialDate);
+
+        if (
+            mobileParsed.transactions.length > 0 &&
+            this.scoreParseResult(mobileParsed.transactions) >= Math.max(
+                this.scoreParseResult(positionedTable.transactions),
+                this.scoreParseResult(textParsed.transactions)
+            )
+        ) {
+            return mobileParsed;
+        }
 
         if (positionedTable.isTable && positionedTable.transactions.length > 0) {
             return positionedTable;
@@ -230,7 +241,16 @@ class Scanner {
     }
 
     static parsePdfOcrDataWithState(ocrData, initialDate = '') {
+        const mobileParsed = this.parsePositionedMobileTransactionListWithState(ocrData, initialDate);
         const positionedTable = this.parsePositionedTransactionTableWithState(ocrData, initialDate);
+
+        if (
+            mobileParsed.transactions.length > 0 &&
+            this.scoreParseResult(mobileParsed.transactions) >= this.scoreParseResult(positionedTable.transactions)
+        ) {
+            return mobileParsed;
+        }
+
         if (positionedTable.transactions.length > 0) {
             return positionedTable;
         }
@@ -248,11 +268,177 @@ class Scanner {
             }
         }
 
-        return this.parseTextWithState((ocrData && ocrData.text) || '', initialDate);
+        const textParsed = this.parseTextWithState((ocrData && ocrData.text) || '', initialDate);
+        return this.scoreParseResult(mobileParsed.transactions) >= this.scoreParseResult(textParsed.transactions)
+            ? mobileParsed
+            : textParsed;
+    }
+
+    static parsePositionedMobileTransactionListWithState(ocrData, initialDate = '') {
+        const words = this.extractPositionedWords(ocrData);
+        if (words.length === 0) {
+            return { transactions: [], lastActiveDate: initialDate || '', isMobileList: false };
+        }
+
+        const rows = this.groupWordsIntoRows(words);
+        const moneyWords = this.extractMoneyWords(words);
+        if (rows.length === 0 || moneyWords.length === 0) {
+            return { transactions: [], lastActiveDate: initialDate || '', isMobileList: false };
+        }
+        if (this.hasTableHeaderSignals(rows)) {
+            return { transactions: [], lastActiveDate: initialDate || '', isMobileList: false };
+        }
+
+        const maxX = Math.max(...words.map(word => word.x1));
+        const mobileAmountWords = moneyWords
+            .filter(word => this.isMobileRightSideAmount(word, maxX))
+            .sort((left, right) => left.y - right.y);
+
+        if (mobileAmountWords.length === 0) {
+            return { transactions: [], lastActiveDate: initialDate || '', isMobileList: false };
+        }
+
+        const candidates = [];
+        const dateRegex = this.dateTokenRegex();
+        const typicalGap = this.estimateTypicalVerticalGap(mobileAmountWords);
+
+        mobileAmountWords.forEach((amountWord, index) => {
+            const previous = mobileAmountWords[index - 1];
+            const next = mobileAmountWords[index + 1];
+            const top = previous ? (previous.y + amountWord.y) / 2 : amountWord.y - Math.max(130, typicalGap * 0.7);
+            const bottom = next ? (amountWord.y + next.y) / 2 : amountWord.y + Math.max(150, typicalGap * 0.65);
+            const blockRows = rows.filter(row => row.y >= top && row.y < bottom);
+            if (blockRows.length === 0) return;
+
+            const usableRows = blockRows.filter(row => !this.isMobileListUiLine(row.text));
+            const nameRows = usableRows.filter(row => !this.isMobileMetadataLine(row.text, dateRegex));
+            const blockWords = usableRows.flatMap(row => row.words);
+            if (blockWords.length === 0) return;
+
+            const amount = this.parseAmount(amountWord.text);
+            if (!this.isReasonableAmount(amount)) return;
+
+            const dateMatch = this.normalizeText(blockRows.map(row => row.text).join(' ')).match(dateRegex);
+            const lineDate = dateMatch ? this.normalizeDate(dateMatch[0]) : initialDate;
+            const balanceWord = this.chooseMobileBalanceWord(blockWords, amountWord, maxX);
+            const name = this.cleanNameCandidate(
+                nameRows
+                    .flatMap(row => row.words)
+                    .filter(word => {
+                        return word.x0 < amountWord.x0 - 6 &&
+                            !this.isSamePositionedWord(word, amountWord) &&
+                            !dateRegex.test(word.text) &&
+                            !this.isStatusDatePlaceholder(word.text) &&
+                            !this.isRowActionNoise(word.text) &&
+                            !this.extractAmountTokens(word.text).length;
+                    })
+                    .map(word => word.text)
+                    .join(' ')
+            );
+            if (!this.isLikelyMerchantName(name)) return;
+
+            const amountText = this.getMobileSignedAmountText(blockWords, amountWord);
+            candidates.push({
+                date: lineDate || '',
+                name,
+                amount,
+                amountText,
+                balanceAfter: balanceWord ? this.parseSignedAmount(balanceWord.text) : null,
+                balanceText: balanceWord ? balanceWord.text : '',
+                moneyCandidates: this.extractMoneyWords(blockWords).map(word => ({
+                    text: word.text,
+                    amount: this.parseAmount(word.text),
+                    isBalanceCandidate: balanceWord ? this.isSamePositionedWord(word, balanceWord) : false
+                })),
+                typeHint: CategorizationEngine.guessType(name, amountText)
+            });
+        });
+
+        const transactions = candidates.map(candidate => this.buildTransactionFromCandidate(candidate));
+        const lastDated = [...transactions].reverse().find(transaction => transaction.date);
+
+        return {
+            transactions,
+            lastActiveDate: lastDated ? lastDated.date : initialDate || '',
+            isMobileList: transactions.length > 0
+        };
+    }
+
+    static isMobileRightSideAmount(word, maxX) {
+        const amount = this.parseAmount(word.text);
+        if (!this.isReasonableAmount(amount)) return false;
+        return this.wordCenterX(word) >= maxX * 0.52;
+    }
+
+    static hasTableHeaderSignals(rows) {
+        return rows.some(row => {
+            const lower = String(row.text || '').toLowerCase();
+            return /\b(amount|balance)\b/.test(lower) && /\b(date|description|posting|type)\b/.test(lower);
+        });
+    }
+
+    static estimateTypicalVerticalGap(words) {
+        const sorted = [...words].sort((left, right) => left.y - right.y);
+        const gaps = [];
+
+        for (let index = 1; index < sorted.length; index += 1) {
+            const gap = sorted[index].y - sorted[index - 1].y;
+            if (gap > 20) gaps.push(gap);
+        }
+
+        if (gaps.length === 0) return 180;
+        gaps.sort((a, b) => a - b);
+        return gaps[Math.floor(gaps.length / 2)];
+    }
+
+    static isMobileListUiLine(line) {
+        const lower = String(line || '').toLowerCase();
+        return /\b(total checking|manage account|see all transactions|see statements|checking benefits|pay transfer more)\b/.test(lower);
+    }
+
+    static isMobileMetadataLine(line, dateRegex) {
+        const normalizedLine = this.normalizeText(line);
+        if (!normalizedLine) return true;
+        if (/^(pending|posted|-+)$/.test(normalizedLine.toLowerCase())) return true;
+        if (/^id[:#]?\b/i.test(normalizedLine)) return true;
+        if (this.extractAmountTokens(normalizedLine).length && !this.cleanNameCandidate(this.stripTransactionTokens(normalizedLine))) return true;
+
+        const withoutDate = normalizedLine.replace(dateRegex, ' ').replace(/\s+/g, ' ').trim();
+        if (!withoutDate || withoutDate === ',') return true;
+        return false;
+    }
+
+    static chooseMobileBalanceWord(blockWords, amountWord, maxX) {
+        const balances = this.extractMoneyWords(blockWords)
+            .filter(word => !this.isSamePositionedWord(word, amountWord))
+            .filter(word => this.wordCenterX(word) < maxX * 0.52)
+            .filter(word => word.y >= amountWord.y - 8)
+            .sort((left, right) => Math.abs(left.y - amountWord.y) - Math.abs(right.y - amountWord.y));
+
+        return balances[0] || null;
+    }
+
+    static getMobileSignedAmountText(blockWords, amountWord) {
+        const signWord = blockWords.find(word => {
+            if (Math.abs(word.y - amountWord.y) > Math.max(10, amountWord.height)) return false;
+            if (word.x1 > amountWord.x0 + 3 || word.x0 < amountWord.x0 - 40) return false;
+            return /^[-+]$/.test(word.text) || /^[-+]?\$$/.test(word.text);
+        });
+
+        if (!signWord || /^[+$]$/.test(signWord.text)) return amountWord.text;
+        return `${signWord.text.replace('$', '')}${amountWord.text}`;
+    }
+
+    static isSamePositionedWord(left, right) {
+        if (!left || !right) return false;
+        return left.text === right.text &&
+            Math.abs(left.x0 - right.x0) <= 1 &&
+            Math.abs(left.x1 - right.x1) <= 1 &&
+            Math.abs(left.y - right.y) <= 1;
     }
 
     static parseTransactionTableLinesWithState(lines, initialDate = '') {
-        const transactions = [];
+        const candidates = [];
         const dateRegex = this.dateTokenRegex();
         let activeDate = initialDate || '';
 
@@ -270,6 +456,8 @@ class Scanner {
             const amountToken = this.chooseTableTransactionAmountToken(normalizedLine, amountTokens);
             const amount = this.parseAmount(amountToken);
             if (!this.isReasonableAmount(amount)) return;
+            const balanceToken = this.getTrailingBalanceToken(amountTokens);
+            const balanceAfter = balanceToken ? this.parseSignedAmount(balanceToken.text) : null;
 
             const name = this.cleanNameCandidate(
                 normalizedLine
@@ -279,19 +467,24 @@ class Scanner {
             );
             if (!this.isLikelyMerchantName(name)) return;
 
-            const categorized = CategorizationEngine.categorize(name, CategorizationEngine.guessType(name, amountToken));
-            transactions.push({
+            candidates.push({
                 date: lineDate,
                 name,
                 amount,
-                type: categorized.type,
-                category: categorized.c,
-                subCategory: categorized.s
+                amountText: amountToken,
+                balanceAfter,
+                balanceText: balanceToken ? balanceToken.text : '',
+                moneyCandidates: amountTokens.map(token => ({
+                    text: token.text,
+                    amount: this.parseAmount(token.text),
+                    isBalanceCandidate: balanceToken ? token.index === balanceToken.index && token.text === balanceToken.text : false
+                })),
+                typeHint: CategorizationEngine.guessType(name, amountToken)
             });
         });
 
         return {
-            transactions,
+            transactions: this.reconcileRunningBalanceCandidates(candidates).map(candidate => this.buildTransactionFromCandidate(candidate)),
             lastActiveDate: activeDate
         };
     }
@@ -309,7 +502,7 @@ class Scanner {
             return { transactions: [], lastActiveDate: initialDate || '', isTable: false };
         }
 
-        const transactions = [];
+        const candidates = [];
         const dateRegex = this.dateTokenRegex();
         let activeDate = initialDate || '';
 
@@ -330,6 +523,7 @@ class Scanner {
 
             const amountWord = this.choosePositionedAmountWord(moneyWords, columnHints);
             if (!amountWord) return;
+            const balanceWord = this.choosePositionedBalanceWord(moneyWords, columnHints);
 
             const amount = this.parseAmount(amountWord.text);
             if (!this.isReasonableAmount(amount)) return;
@@ -348,22 +542,165 @@ class Scanner {
             if (!this.isLikelyMerchantName(name)) return;
 
             const inferredType = this.guessTypeFromPositionedTableRow(row, amountWord, name, columnHints);
-            const categorized = CategorizationEngine.categorize(name, inferredType);
-            transactions.push({
+            candidates.push({
                 date: lineDate,
                 name,
                 amount,
-                type: categorized.type,
-                category: categorized.c,
-                subCategory: categorized.s
+                amountText: amountWord.text,
+                balanceAfter: balanceWord ? this.parseSignedAmount(balanceWord.text) : null,
+                balanceText: balanceWord ? balanceWord.text : '',
+                moneyCandidates: moneyWords.map(word => ({
+                    text: word.text,
+                    amount: this.parseAmount(word.text),
+                    isBalanceCandidate: balanceWord ? word === balanceWord : false
+                })),
+                typeHint: inferredType
             });
         });
 
         return {
-            transactions,
+            transactions: this.reconcileRunningBalanceCandidates(candidates).map(candidate => this.buildTransactionFromCandidate(candidate)),
             lastActiveDate: activeDate,
             isTable: true
         };
+    }
+
+    static buildTransactionFromCandidate(candidate) {
+        const preferredType = candidate.typeHint || CategorizationEngine.guessType(candidate.name, candidate.amountText);
+        const categorized = CategorizationEngine.categorize(candidate.name, preferredType);
+        const transaction = {
+            date: candidate.date,
+            name: candidate.name,
+            amount: candidate.amount,
+            type: categorized.type,
+            category: categorized.c,
+            subCategory: categorized.s
+        };
+
+        if (Number.isFinite(candidate.balanceAfter)) {
+            transaction.scanBalanceAfter = this.roundMoney(candidate.balanceAfter);
+        }
+        if (candidate.scanBalanceMatched) {
+            transaction.scanBalanceMatched = true;
+        }
+        if (candidate.scanWarning) {
+            transaction.scanWarning = candidate.scanWarning;
+        }
+
+        return transaction;
+    }
+
+    static reconcileRunningBalanceCandidates(candidates) {
+        const reconciled = candidates.map(candidate => ({
+            ...candidate,
+            moneyCandidates: (candidate.moneyCandidates || []).filter(item => this.isReasonableAmount(item.amount))
+        }));
+
+        if (reconciled.filter(candidate => Number.isFinite(candidate.balanceAfter)).length < 2) {
+            return reconciled;
+        }
+
+        const order = this.detectRunningBalanceOrder(reconciled);
+        for (let index = 0; index < reconciled.length - 1; index += 1) {
+            const current = reconciled[index];
+            const next = reconciled[index + 1];
+            if (!Number.isFinite(current.balanceAfter) || !Number.isFinite(next.balanceAfter)) continue;
+
+            const targetIndex = order === 'oldest-first' ? index + 1 : index;
+            const target = reconciled[targetIndex];
+            const signedDifference = order === 'oldest-first'
+                ? next.balanceAfter - current.balanceAfter
+                : current.balanceAfter - next.balanceAfter;
+            const expectedAmount = this.roundMoney(Math.abs(signedDifference));
+            if (!this.isReasonableAmount(expectedAmount)) continue;
+
+            const matchingMoney = this.findMoneyCandidateMatchingAmount(target, expectedAmount);
+            if (matchingMoney) {
+                target.amount = matchingMoney.amount;
+                target.amountText = matchingMoney.text;
+                target.scanBalanceMatched = true;
+                target.scanWarning = '';
+                continue;
+            }
+
+            if (!this.amountsClose(target.amount, expectedAmount) && target.moneyCandidates.length >= 2) {
+                target.scanWarning = `Running balance changes by ${this.formatMoney(expectedAmount)}, but OCR read ${this.formatMoney(target.amount)}. Please review this amount.`;
+            }
+        }
+
+        return reconciled;
+    }
+
+    static detectRunningBalanceOrder(candidates) {
+        const newestFirstScore = this.scoreRunningBalanceOrder(candidates, 'newest-first');
+        const oldestFirstScore = this.scoreRunningBalanceOrder(candidates, 'oldest-first');
+
+        if (newestFirstScore >= oldestFirstScore + 2) return 'newest-first';
+        if (oldestFirstScore >= newestFirstScore + 2) return 'oldest-first';
+
+        const dateOrder = this.detectDateOrder(candidates);
+        if (dateOrder === 'ascending') return 'oldest-first';
+        if (dateOrder === 'descending') return 'newest-first';
+
+        return newestFirstScore >= oldestFirstScore ? 'newest-first' : 'oldest-first';
+    }
+
+    static scoreRunningBalanceOrder(candidates, order) {
+        let score = 0;
+
+        for (let index = 0; index < candidates.length - 1; index += 1) {
+            const current = candidates[index];
+            const next = candidates[index + 1];
+            if (!Number.isFinite(current.balanceAfter) || !Number.isFinite(next.balanceAfter)) continue;
+
+            const target = order === 'oldest-first' ? next : current;
+            const signedDifference = order === 'oldest-first'
+                ? next.balanceAfter - current.balanceAfter
+                : current.balanceAfter - next.balanceAfter;
+            const expectedAmount = this.roundMoney(Math.abs(signedDifference));
+            if (!this.isReasonableAmount(expectedAmount)) continue;
+
+            if (this.amountsClose(target.amount, expectedAmount)) score += 1;
+            if (this.findMoneyCandidateMatchingAmount(target, expectedAmount)) score += 3;
+        }
+
+        return score;
+    }
+
+    static detectDateOrder(candidates) {
+        const dated = candidates
+            .map(candidate => Date.parse(candidate.date))
+            .filter(time => Number.isFinite(time));
+        if (dated.length < 2) return '';
+
+        let ascending = 0;
+        let descending = 0;
+        for (let index = 1; index < dated.length; index += 1) {
+            if (dated[index] > dated[index - 1]) ascending += 1;
+            if (dated[index] < dated[index - 1]) descending += 1;
+        }
+
+        if (ascending > descending) return 'ascending';
+        if (descending > ascending) return 'descending';
+        return '';
+    }
+
+    static findMoneyCandidateMatchingAmount(candidate, expectedAmount) {
+        const moneyCandidates = candidate.moneyCandidates || [];
+        return moneyCandidates.find(item => !item.isBalanceCandidate && this.amountsClose(item.amount, expectedAmount)) || null;
+    }
+
+    static amountsClose(left, right) {
+        return Math.abs(this.roundMoney(left) - this.roundMoney(right)) <= 0.01;
+    }
+
+    static roundMoney(value) {
+        return Math.round((Number(value) || 0) * 100) / 100;
+    }
+
+    static formatMoney(value) {
+        const rounded = this.roundMoney(value);
+        return `${rounded < 0 ? '-' : ''}$${Math.abs(rounded).toFixed(2)}`;
     }
 
     static extractOcrRows(ocrData) {
@@ -586,6 +923,21 @@ class Scanner {
         return scored[0].word;
     }
 
+    static choosePositionedBalanceWord(moneyWords, columnHints) {
+        if (moneyWords.length < 2) return null;
+
+        const scored = moneyWords.map(word => {
+            const center = this.wordCenterX(word);
+            return {
+                word,
+                score: Math.abs(center - columnHints.balanceX) - (center > columnHints.amountX ? 20 : 0)
+            };
+        });
+
+        scored.sort((a, b) => a.score - b.score);
+        return scored[0].word;
+    }
+
     static wordCenterX(word) {
         return (Number(word.x0) + Number(word.x1)) / 2;
     }
@@ -740,6 +1092,10 @@ class Scanner {
         return tokens[0].text;
     }
 
+    static getTrailingBalanceToken(tokens) {
+        return tokens.length >= 2 ? tokens[tokens.length - 1] : null;
+    }
+
     static looksLikeStatementAmountRow(line, tokens) {
         if (tokens.length < 2) return false;
 
@@ -751,13 +1107,21 @@ class Scanner {
     }
 
     static parseAmount(token) {
-        const normalized = String(token || '')
+        const parsed = this.parseSignedAmount(token);
+        return Number.isFinite(parsed) ? Math.abs(parsed) : 0;
+    }
+
+    static parseSignedAmount(token) {
+        const raw = String(token || '');
+        const isParenthetical = /\([^)]*\)/.test(raw);
+        const normalized = raw
             .replace(/[Oo]/g, '0')
             .replace(/[$,\s]/g, '')
             .replace(/[^0-9.+-]/g, '');
 
         const parsed = parseFloat(normalized);
-        return Number.isFinite(parsed) ? Math.abs(parsed) : 0;
+        if (!Number.isFinite(parsed)) return NaN;
+        return isParenthetical ? -Math.abs(parsed) : parsed;
     }
 
     static isReasonableAmount(amount) {
@@ -839,6 +1203,10 @@ class Scanner {
     static cleanNameCandidate(text) {
         const cleaned = (text || '')
             .replace(/[\u25A0-\u25FF\u2600-\u27BF]/g, ' ')
+            .replace(/\borig\s+co\s+name\s*:?/gi, ' ')
+            .replace(/\bco\s+entry\s+descr\s*:?/gi, ' ')
+            .replace(/\bentry\s+descr\s*:?/gi, ' ')
+            .replace(/\bpurchase\s+s\b/gi, ' ')
             .replace(/\b(?:trn|trace|auth|authorization|conf|confirmation|reference|ref|id)[:#]?\s*[xX\d.-]{3,}\b/gi, ' ')
             .replace(/\b(?:confirmation#?|conf#?)\s*[xX\d.-]{3,}\b/gi, ' ')
             .replace(/\b[xX]{3,}\d*\b/g, ' ')
