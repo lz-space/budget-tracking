@@ -19,11 +19,18 @@ class CategoryService {
     }
 
     static getTree() {
-        const stored = localStorage.getItem(this.TREE_KEY);
+        const stored = SpendletStorage.getItem(this.TREE_KEY);
         if (!stored) return this.cloneDefaultTree();
 
-        const tree = JSON.parse(stored);
-        if (localStorage.getItem(this.DEFAULTS_MERGED_KEY)) {
+        let tree = null;
+        try {
+            tree = JSON.parse(stored);
+        } catch (error) {
+            console.warn('Saved category tree could not be read. Using defaults.', error);
+            return this.cloneDefaultTree();
+        }
+
+        if (SpendletStorage.getItem(this.DEFAULTS_MERGED_KEY)) {
             return tree;
         }
 
@@ -33,8 +40,8 @@ class CategoryService {
     }
 
     static saveTree(tree) {
-        localStorage.setItem(this.TREE_KEY, JSON.stringify(tree));
-        localStorage.setItem(this.DEFAULTS_MERGED_KEY, 'true');
+        SpendletStorage.setItem(this.TREE_KEY, JSON.stringify(tree));
+        SpendletStorage.setItem(this.DEFAULTS_MERGED_KEY, 'true');
     }
 
     static mergeTrees(baseTree, incomingTree) {

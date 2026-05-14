@@ -34,12 +34,20 @@ class CategorizationEngine {
     ];
 
     static getCustomRules() {
-        const rules = localStorage.getItem(this.CUSTOM_RULES_KEY);
-        return rules ? JSON.parse(rules) : {};
+        const rules = SpendletStorage.getItem(this.CUSTOM_RULES_KEY);
+        if (!rules) return {};
+
+        try {
+            const parsed = JSON.parse(rules);
+            return parsed && typeof parsed === 'object' ? parsed : {};
+        } catch (error) {
+            console.warn('Saved categorization rules could not be read.', error);
+            return {};
+        }
     }
 
     static saveCustomRules(rules) {
-        localStorage.setItem(this.CUSTOM_RULES_KEY, JSON.stringify(rules));
+        SpendletStorage.setItem(this.CUSTOM_RULES_KEY, JSON.stringify(rules));
     }
 
     static normalizeName(name) {

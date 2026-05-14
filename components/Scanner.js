@@ -2,6 +2,23 @@ class Scanner {
     static MAX_IMAGE_DIMENSION = 1800;
     static MAX_OCR_IMAGE_DIMENSION = 2600;
     static PDF_RENDER_SCALE = 3;
+    static PDF_LOAD_TIMEOUT_MS = 15000;
+    static PDF_OPEN_TIMEOUT_MS = 20000;
+    static OCR_LOAD_TIMEOUT_MS = 15000;
+    static TESSERACT_SOURCE = 'vendor/tesseract/tesseract.min.js';
+    static TESSERACT_PATHS = {
+        workerPath: 'vendor/tesseract/worker.min.js',
+        corePath: 'vendor/tesseract/core',
+        langPath: 'vendor/tesseract/lang'
+    };
+    static PDFJS_SOURCES = [
+        {
+            name: 'bundled PDF reader',
+            type: 'script',
+            lib: 'vendor/pdf.min.js',
+            worker: 'vendor/pdf.worker.min.js'
+        }
+    ];
     static NON_TRANSACTION_TERMS = [
         'balance', 'available', 'account', 'statement', 'activity', 'ending',
         'routing', 'member fdic', 'search', 'filter', 'deposit account',
@@ -14,6 +31,7 @@ class Scanner {
         if (!fileElement.files || fileElement.files.length === 0) return [];
 
         let allTransactions = [];
+        let lastErrorMessage = '';
 
         for (let i = 0; i < fileElement.files.length; i += 1) {
             const file = fileElement.files[i];
@@ -35,11 +53,35 @@ class Scanner {
                 allTransactions = allTransactions.concat(transactions);
             } catch (error) {
                 console.error(error);
-                statusCallback(`Could not read file ${i + 1}. Try a clearer image or a text-based PDF.`);
+                lastErrorMessage = this.formatReadError(error);
+                statusCallback(`Could not read file ${i + 1}. ${lastErrorMessage}`);
             }
         }
 
+        if (allTransactions.length === 0 && lastErrorMessage) {
+            return {
+                error: lastErrorMessage
+            };
+        }
+
         return allTransactions;
+    }
+
+    static formatReadError(error) {
+        const message = [error && error.name, error && error.message]
+            .filter(Boolean)
+            .join(': ') || String(error || '');
+
+        if (/insecure|security/i.test(message)) {
+            if (window.location && window.location.protocol === 'file:') {
+                return 'This page is open as file://, so the browser blocks PDF and OCR scanning. Open http://127.0.0.1:8013/ instead.';
+            }
+
+            const localUrl = window.location && window.location.origin ? window.location.origin : 'the local app page';
+            return `The browser blocked a reader security operation. Reload ${localUrl}/ and try again. Details: ${message}`;
+        }
+
+        return message || 'Try a clearer image or a text-based PDF.';
     }
 
     static isSupportedFile(file) {
@@ -61,13 +103,16 @@ class Scanner {
         const variants = this.prepareImageVariants(image);
         let bestTransactions = [];
         let bestScore = -Infinity;
+        statusCallback(`Loading OCR reader for image ${fileNumber}/${totalFiles}...`);
+        await this.ensureTesseract(statusCallback);
 
         for (const variant of variants) {
             statusCallback(`Scanning image ${fileNumber}/${totalFiles} (${variant.label})...`);
             const ocrData = await this.runOcrDataOnCanvas(variant.canvas, message => {
                 statusCallback(`Scanning image ${fileNumber}/${totalFiles} (${variant.label})... ${message}%`);
             });
-            const transactions = this.parseImageOcrDataWithState(ocrData, '').transactions;
+            const dateContext = this.buildDateContextFromLines(this.extractOcrPositionedLines(ocrData).concat(this.prepareLines((ocrData && ocrData.text) || '')));
+            const transactions = this.parseImageOcrDataWithState(ocrData, '', dateContext).transactions;
             const score = this.scoreParseResult(transactions);
 
             if (score > bestScore) {
@@ -84,27 +129,37 @@ class Scanner {
     }
 
     static async processPdf(file, statusCallback, fileNumber, totalFiles) {
-        if (!window.pdfjsLib) {
-            throw new Error('PDF support is still loading. Refresh and try again.');
-        }
-
+        statusCallback(`Preparing PDF ${fileNumber}/${totalFiles}...`);
+        const pdfjsLib = await this.ensurePdfJs(statusCallback);
+        statusCallback(`Opening PDF ${fileNumber}/${totalFiles}...`);
         const buffer = await file.arrayBuffer();
-        const loadingTask = window.pdfjsLib.getDocument({ data: buffer });
-        const pdf = await loadingTask.promise;
+        const pdf = await this.getPdfDocument(pdfjsLib, buffer, statusCallback, fileNumber, totalFiles);
         let allTransactions = [];
+        let activeDate = '';
+        let pdfDateContext = null;
+        let readableTextLineCount = 0;
 
         for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
             statusCallback(`Reading PDF ${fileNumber}/${totalFiles}, page ${pageNumber}/${pdf.numPages}...`);
             const page = await pdf.getPage(pageNumber);
-            let activeDate = '';
 
             const textLines = await this.extractPdfTextLines(page);
-            let parsed = this.parseLinesWithState(textLines, activeDate);
+            readableTextLineCount += textLines.length;
+            pdfDateContext = this.mergeDateContexts(pdfDateContext, this.buildDateContextFromLines(textLines, activeDate));
+            let parsed = this.parseLinesWithState(textLines, activeDate, pdfDateContext);
             let transactions = parsed.transactions;
             activeDate = parsed.lastActiveDate;
 
+            const positionedTextData = await this.extractPdfPositionedTextData(page);
+            const positionedParsed = this.parsePdfOcrDataWithState(positionedTextData, activeDate, pdfDateContext);
+            if (this.scoreParseResult(positionedParsed.transactions) > this.scoreParseResult(transactions)) {
+                parsed = positionedParsed;
+                transactions = parsed.transactions;
+                activeDate = parsed.lastActiveDate;
+            }
+
             if (this.shouldUsePdfOcr(textLines, transactions)) {
-                parsed = await this.scanPdfPageWithOcrVariants(page, activeDate, statusCallback, fileNumber, totalFiles, pageNumber, pdf.numPages);
+                parsed = await this.scanPdfPageWithOcrVariants(page, activeDate, pdfDateContext, statusCallback, fileNumber, totalFiles, pageNumber, pdf.numPages);
                 if (
                     this.shouldPreferPdfOcr(textLines, transactions, parsed.transactions) ||
                     this.scoreParseResult(parsed.transactions) > this.scoreParseResult(transactions)
@@ -117,10 +172,197 @@ class Scanner {
             allTransactions = allTransactions.concat(transactions);
         }
 
+        if (allTransactions.length === 0) {
+            throw new Error(readableTextLineCount > 0
+                ? `PDF opened and ${readableTextLineCount} text lines were readable, but no transaction rows matched. Try exporting the account activity PDF/CSV instead of a statement summary, or upload a screenshot of the transaction table.`
+                : 'PDF opened, but it did not contain readable text and OCR could not find transaction rows.');
+        }
+
         return allTransactions;
     }
 
-    static async scanPdfPageWithOcrVariants(page, activeDate, statusCallback, fileNumber, totalFiles, pageNumber, pageCount) {
+    static async ensurePdfJs(statusCallback) {
+        if (window.pdfjsLib) {
+            return window.pdfjsLib;
+        }
+
+        if (window.__spendletPdfJsPromise) {
+            return window.__spendletPdfJsPromise;
+        }
+
+        window.__spendletPdfJsPromise = (async () => {
+            let lastError = null;
+
+            for (const source of this.PDFJS_SOURCES) {
+                try {
+                    if (statusCallback) {
+                        statusCallback(`Loading PDF reader from ${source.name}...`);
+                    }
+
+                    const pdfjsLib = await this.withTimeout(
+                        this.loadPdfJsSource(source),
+                        this.PDF_LOAD_TIMEOUT_MS,
+                        `PDF reader did not load from ${source.name}.`
+                    );
+                    pdfjsLib.GlobalWorkerOptions.workerSrc = source.worker;
+                    window.pdfjsLib = pdfjsLib;
+                    return pdfjsLib;
+                } catch (error) {
+                    lastError = error;
+                    console.warn(`Could not load PDF.js from ${source.name}:`, error);
+                }
+            }
+
+            throw new Error(`Could not load the PDF reader. Check your internet connection and try again.${lastError ? ` ${lastError.message}` : ''}`);
+        })();
+
+        try {
+            return await window.__spendletPdfJsPromise;
+        } catch (error) {
+            window.__spendletPdfJsPromise = null;
+            throw error;
+        }
+    }
+
+    static async loadPdfJsSource(source) {
+        if (source.type === 'script') {
+            return this.loadPdfJsScript(source.lib);
+        }
+
+        return import(source.lib);
+    }
+
+    static loadPdfJsScript(src) {
+        return new Promise((resolve, reject) => {
+            if (window.pdfjsLib) {
+                resolve(window.pdfjsLib);
+                return;
+            }
+
+            this.loadScript(src, 'pdfjs').then(() => {
+                if (window.pdfjsLib) {
+                    resolve(window.pdfjsLib);
+                } else {
+                    reject(new Error(`PDF reader loaded from ${src}, but did not initialize.`));
+                }
+            }).catch(reject);
+        });
+    }
+
+    static async getPdfDocument(pdfjsLib, buffer, statusCallback, fileNumber, totalFiles) {
+        const loadPdf = options => pdfjsLib.getDocument({
+            data: new Uint8Array(buffer.slice(0)),
+            ...options
+        }).promise;
+
+        try {
+            // Local file:// pages can stall when PDF.js tries to start a worker.
+            return await this.withTimeout(
+                loadPdf({ disableWorker: true }),
+                this.PDF_OPEN_TIMEOUT_MS,
+                'PDF reader timed out while opening the file.'
+            );
+        } catch (error) {
+            console.warn('PDF reader failed, retrying once:', error);
+            if (statusCallback) {
+                statusCallback(`Retrying PDF ${fileNumber}/${totalFiles} without background worker...`);
+            }
+            return this.withTimeout(
+                loadPdf({ disableWorker: true, stopAtErrors: false }),
+                this.PDF_OPEN_TIMEOUT_MS,
+                'PDF reader could not open this file.'
+            );
+        }
+    }
+
+    static withTimeout(promise, timeoutMs, message) {
+        let timerId;
+        const timeout = new Promise((_, reject) => {
+            timerId = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+        });
+
+        return Promise.race([promise, timeout]).finally(() => {
+            window.clearTimeout(timerId);
+        });
+    }
+
+    static async ensureTesseract(statusCallback) {
+        if (window.Tesseract) {
+            return window.Tesseract;
+        }
+
+        if (window.__spendletTesseractPromise) {
+            return window.__spendletTesseractPromise;
+        }
+
+        window.__spendletTesseractPromise = (async () => {
+            if (statusCallback) {
+                statusCallback('Loading OCR reader...');
+            }
+
+            await this.withTimeout(
+                this.loadScript(this.TESSERACT_SOURCE, 'tesseract'),
+                this.OCR_LOAD_TIMEOUT_MS,
+                'OCR reader did not load from the bundled app files.'
+            );
+
+            if (!window.Tesseract) {
+                throw new Error('OCR reader loaded, but did not initialize.');
+            }
+
+            return window.Tesseract;
+        })();
+
+        try {
+            return await window.__spendletTesseractPromise;
+        } catch (error) {
+            window.__spendletTesseractPromise = null;
+            throw error;
+        }
+    }
+
+    static getTesseractOptions() {
+        return {
+            workerPath: new URL(this.TESSERACT_PATHS.workerPath, window.location.href).href,
+            corePath: new URL(this.TESSERACT_PATHS.corePath, window.location.href).href,
+            langPath: new URL(this.TESSERACT_PATHS.langPath, window.location.href).href,
+            workerBlobURL: false,
+            cacheMethod: 'none',
+            gzip: true
+        };
+    }
+
+    static loadScript(src, label) {
+        return new Promise((resolve, reject) => {
+            const selector = `script[data-spendlet-${label}="${src}"]`;
+            const existing = document.querySelector(selector);
+            if (existing) {
+                if (existing.dataset.loaded === 'true') {
+                    resolve();
+                    return;
+                }
+
+                existing.addEventListener('load', () => resolve(), { once: true });
+                existing.addEventListener('error', () => reject(new Error(`Could not load ${src}`)), { once: true });
+                return;
+            }
+
+            const script = document.createElement('script');
+            script.src = src;
+            script.async = true;
+            script.dataset[`spendlet${label.charAt(0).toUpperCase()}${label.slice(1)}`] = src;
+            script.onload = () => {
+                script.dataset.loaded = 'true';
+                resolve();
+            };
+            script.onerror = () => reject(new Error(`Could not load ${src}`));
+            document.head.appendChild(script);
+        });
+    }
+
+    static async scanPdfPageWithOcrVariants(page, activeDate, dateContext, statusCallback, fileNumber, totalFiles, pageNumber, pageCount) {
+        statusCallback(`Loading OCR reader for PDF ${fileNumber}/${totalFiles}, page ${pageNumber}/${pageCount}...`);
+        await this.ensureTesseract(statusCallback);
         const variants = [
             { label: 'balanced', scale: this.PDF_RENDER_SCALE, mode: 'balanced' },
             { label: 'high contrast', scale: this.PDF_RENDER_SCALE, mode: 'contrast' },
@@ -136,7 +378,11 @@ class Scanner {
             const ocrData = await this.runOcrDataOnCanvas(prepared, progress => {
                 statusCallback(`Scanning PDF ${fileNumber}/${totalFiles}, page ${pageNumber}/${pageCount} (${variant.label})... ${progress}%`);
             });
-            const parsed = this.parsePdfOcrDataWithState(ocrData, activeDate);
+            const ocrDateContext = this.mergeDateContexts(
+                dateContext,
+                this.buildDateContextFromLines(this.extractOcrPositionedLines(ocrData).concat(this.prepareLines((ocrData && ocrData.text) || '')), activeDate)
+            );
+            const parsed = this.parsePdfOcrDataWithState(ocrData, activeDate, ocrDateContext);
             const score = this.scoreParseResult(parsed.transactions);
 
             if (score > bestScore) {
@@ -198,6 +444,55 @@ class Scanner {
             .filter(Boolean);
     }
 
+    static async extractPdfPositionedTextData(page) {
+        const textContent = await page.getTextContent();
+        const words = [];
+        const lines = [];
+
+        textContent.items.forEach(item => {
+            const rawText = this.normalizeText(item.str || '');
+            if (!rawText) return;
+
+            const transform = item.transform || [];
+            const x = Number(transform[4]);
+            const y = -Number(transform[5]);
+            const itemWidth = Math.max(1, Number(item.width) || rawText.length * 7);
+            const itemHeight = Math.max(8, Number(item.height) || Math.abs(Number(transform[3])) || 12);
+
+            if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+
+            lines.push(rawText);
+
+            const tokens = rawText.match(/\S+/g) || [];
+            if (tokens.length === 0) return;
+
+            let charCursor = 0;
+            tokens.forEach(token => {
+                const tokenIndex = rawText.indexOf(token, charCursor);
+                const tokenStart = tokenIndex === -1 ? charCursor : tokenIndex;
+                const tokenEnd = tokenStart + token.length;
+                const x0 = x + (tokenStart / rawText.length) * itemWidth;
+                const x1 = x + (tokenEnd / rawText.length) * itemWidth;
+                charCursor = tokenEnd;
+
+                words.push({
+                    text: token,
+                    bbox: {
+                        x0,
+                        x1,
+                        y0: y,
+                        y1: y + itemHeight
+                    }
+                });
+            });
+        });
+
+        return {
+            text: lines.join('\n'),
+            words
+        };
+    }
+
     static parseText(rawText) {
         return this.parseTextWithState(rawText, '').transactions;
     }
@@ -206,20 +501,25 @@ class Scanner {
         return this.parseLinesWithState(lines, '').transactions;
     }
 
-    static parseTextWithState(rawText, initialDate = '') {
+    static parseTextWithState(rawText, initialDate = '', dateContext = null) {
         const lines = this.prepareLines(rawText);
-        const tableParsed = this.parseTransactionTableLinesWithState(lines, initialDate);
-        const standardParsed = this.parseLinesWithState(lines, initialDate);
+        const resolvedDateContext = this.mergeDateContexts(dateContext, this.buildDateContextFromLines(lines, initialDate));
+        const tableParsed = this.parseTransactionTableLinesWithState(lines, initialDate, resolvedDateContext);
+        const standardParsed = this.parseLinesWithState(lines, initialDate, resolvedDateContext);
 
         return this.scoreParseResult(tableParsed.transactions) > this.scoreParseResult(standardParsed.transactions)
             ? tableParsed
             : standardParsed;
     }
 
-    static parseImageOcrDataWithState(ocrData, initialDate = '') {
-        const mobileParsed = this.parsePositionedMobileTransactionListWithState(ocrData, initialDate);
-        const positionedTable = this.parsePositionedTransactionTableWithState(ocrData, initialDate);
-        const textParsed = this.parseTextWithState((ocrData && ocrData.text) || '', initialDate);
+    static parseImageOcrDataWithState(ocrData, initialDate = '', dateContext = null) {
+        const resolvedDateContext = this.mergeDateContexts(
+            dateContext,
+            this.buildDateContextFromLines(this.extractOcrPositionedLines(ocrData).concat(this.prepareLines((ocrData && ocrData.text) || '')), initialDate)
+        );
+        const mobileParsed = this.parsePositionedMobileTransactionListWithState(ocrData, initialDate, resolvedDateContext);
+        const positionedTable = this.parsePositionedTransactionTableWithState(ocrData, initialDate, resolvedDateContext);
+        const textParsed = this.parseTextWithState((ocrData && ocrData.text) || '', initialDate, resolvedDateContext);
 
         if (
             mobileParsed.transactions.length > 0 &&
@@ -240,9 +540,13 @@ class Scanner {
             : textParsed;
     }
 
-    static parsePdfOcrDataWithState(ocrData, initialDate = '') {
-        const mobileParsed = this.parsePositionedMobileTransactionListWithState(ocrData, initialDate);
-        const positionedTable = this.parsePositionedTransactionTableWithState(ocrData, initialDate);
+    static parsePdfOcrDataWithState(ocrData, initialDate = '', dateContext = null) {
+        const resolvedDateContext = this.mergeDateContexts(
+            dateContext,
+            this.buildDateContextFromLines(this.extractOcrPositionedLines(ocrData).concat(this.prepareLines((ocrData && ocrData.text) || '')), initialDate)
+        );
+        const mobileParsed = this.parsePositionedMobileTransactionListWithState(ocrData, initialDate, resolvedDateContext);
+        const positionedTable = this.parsePositionedTransactionTableWithState(ocrData, initialDate, resolvedDateContext);
 
         if (
             mobileParsed.transactions.length > 0 &&
@@ -257,24 +561,24 @@ class Scanner {
 
         const positionedLines = this.extractOcrPositionedLines(ocrData);
         if (positionedLines.length > 0) {
-            const tableParsed = this.parseTransactionTableLinesWithState(positionedLines, initialDate);
+            const tableParsed = this.parseTransactionTableLinesWithState(positionedLines, initialDate, resolvedDateContext);
             if (tableParsed.transactions.length > 0) {
                 return tableParsed;
             }
 
-            const parsed = this.parseLinesWithState(positionedLines, initialDate);
+            const parsed = this.parseLinesWithState(positionedLines, initialDate, resolvedDateContext);
             if (parsed.transactions.length > 0) {
                 return parsed;
             }
         }
 
-        const textParsed = this.parseTextWithState((ocrData && ocrData.text) || '', initialDate);
+        const textParsed = this.parseTextWithState((ocrData && ocrData.text) || '', initialDate, resolvedDateContext);
         return this.scoreParseResult(mobileParsed.transactions) >= this.scoreParseResult(textParsed.transactions)
             ? mobileParsed
             : textParsed;
     }
 
-    static parsePositionedMobileTransactionListWithState(ocrData, initialDate = '') {
+    static parsePositionedMobileTransactionListWithState(ocrData, initialDate = '', dateContext = null) {
         const words = this.extractPositionedWords(ocrData);
         if (words.length === 0) {
             return { transactions: [], lastActiveDate: initialDate || '', isMobileList: false };
@@ -319,7 +623,7 @@ class Scanner {
             if (!this.isReasonableAmount(amount)) return;
 
             const dateMatch = this.normalizeText(blockRows.map(row => row.text).join(' ')).match(dateRegex);
-            const lineDate = dateMatch ? this.normalizeDate(dateMatch[0]) : initialDate;
+            const lineDate = dateMatch ? this.normalizeDate(dateMatch[0], dateContext) : initialDate;
             const balanceWord = this.chooseMobileBalanceWord(blockWords, amountWord, maxX);
             const name = this.cleanNameCandidate(
                 nameRows
@@ -437,17 +741,18 @@ class Scanner {
             Math.abs(left.y - right.y) <= 1;
     }
 
-    static parseTransactionTableLinesWithState(lines, initialDate = '') {
+    static parseTransactionTableLinesWithState(lines, initialDate = '', dateContext = null) {
         const candidates = [];
         const dateRegex = this.dateTokenRegex();
         let activeDate = initialDate || '';
+        const resolvedDateContext = this.mergeDateContexts(dateContext, this.buildDateContextFromLines(lines, initialDate));
 
         lines.forEach(line => {
             const normalizedLine = this.normalizeText(line);
             if (!this.looksLikeTransactionTableLine(normalizedLine)) return;
 
             const dateMatch = normalizedLine.match(dateRegex);
-            const lineDate = dateMatch ? this.normalizeDate(dateMatch[0]) : activeDate;
+            const lineDate = dateMatch ? this.normalizeDate(dateMatch[0], resolvedDateContext) : activeDate;
             if (dateMatch && lineDate) activeDate = lineDate;
 
             const amountTokens = this.extractAmountTokens(normalizedLine);
@@ -489,12 +794,13 @@ class Scanner {
         };
     }
 
-    static parsePositionedTransactionTableWithState(ocrData, initialDate = '') {
+    static parsePositionedTransactionTableWithState(ocrData, initialDate = '', dateContext = null) {
         const positionedWords = this.extractPositionedWords(ocrData);
         const rows = this.extractOcrRows(ocrData);
         if (rows.length === 0) {
             return { transactions: [], lastActiveDate: initialDate || '', isTable: false };
         }
+        const resolvedDateContext = this.mergeDateContexts(dateContext, this.buildDateContextFromLines(rows.map(row => row.text), initialDate));
 
         const allRows = this.groupWordsIntoRows(positionedWords);
         const columnHints = this.detectTransactionTableColumns(allRows.length > rows.length ? allRows : rows);
@@ -514,7 +820,7 @@ class Scanner {
             const hasStatusAnchor = this.hasPositionedStatusAnchor(row, columnHints);
             if (!dateMatch && !hasStatusAnchor) return;
 
-            const lineDate = dateMatch ? this.normalizeDate(dateMatch[0]) : '';
+            const lineDate = dateMatch ? this.normalizeDate(dateMatch[0], resolvedDateContext) : '';
             if (dateMatch && !lineDate) return;
             if (lineDate) activeDate = lineDate;
 
@@ -566,11 +872,12 @@ class Scanner {
     }
 
     static buildTransactionFromCandidate(candidate) {
-        const preferredType = candidate.typeHint || CategorizationEngine.guessType(candidate.name, candidate.amountText);
-        const categorized = CategorizationEngine.categorize(candidate.name, preferredType);
+        const name = this.refineMerchantName(candidate.name);
+        const preferredType = candidate.typeHint || CategorizationEngine.guessType(name, candidate.amountText);
+        const categorized = CategorizationEngine.categorize(name, preferredType);
         const transaction = {
             date: candidate.date,
-            name: candidate.name,
+            name,
             amount: candidate.amount,
             type: categorized.type,
             category: categorized.c,
@@ -951,10 +1258,11 @@ class Scanner {
         return this.extractOcrRows(ocrData).map(row => row.text);
     }
 
-    static parseLinesWithState(lines, initialDate = '') {
+    static parseLinesWithState(lines, initialDate = '', dateContext = null) {
         const transactions = [];
         const dateRegex = this.dateTokenRegex();
         let activeDate = initialDate || '';
+        const resolvedDateContext = this.mergeDateContexts(dateContext, this.buildDateContextFromLines(lines, initialDate));
 
         lines.forEach((line, index) => {
             const normalizedLine = this.normalizeText(line);
@@ -962,7 +1270,7 @@ class Scanner {
             let lineDate = '';
 
             if (dateMatch) {
-                lineDate = this.normalizeDate(dateMatch[0]);
+                lineDate = this.normalizeDate(dateMatch[0], resolvedDateContext);
             }
 
             if (lineDate && !this.lineHasAmount(normalizedLine)) {
@@ -981,7 +1289,7 @@ class Scanner {
             if (!this.isReasonableAmount(amount)) return;
             if (!this.isLikelyTransactionLine(normalizedLine)) return;
 
-            const name = this.extractTransactionName(lines, index, amountMatch, dateRegex);
+            const name = this.refineMerchantName(this.extractTransactionName(lines, index, amountMatch, dateRegex));
             if (!this.isLikelyMerchantName(name)) return;
 
             const categorized = CategorizationEngine.categorize(name, CategorizationEngine.guessType(name, amountMatch));
@@ -1251,21 +1559,217 @@ class Scanner {
         return words.length <= 3 || /-$/.test(text) || text === text.toUpperCase();
     }
 
-    static normalizeDate(input) {
+    static refineMerchantName(name) {
+        const cleaned = this.cleanNameCandidate(name)
+            .replace(/\b(?:usa|us)\b$/i, ' ')
+            .replace(/\b(?:[A-Z]{2})\s+\d{5}(?:-\d{4})?\b/g, ' ')
+            .replace(/\b(?:store|str|terminal|term|loc|location)[:#]?\s*\d+\b/gi, ' ')
+            .replace(/\b(?:mktp|marketplace|digital|prime)\b$/gi, ' ')
+            .replace(/\s{2,}/g, ' ')
+            .trim();
+
+        if (!cleaned) return '';
+
+        const lower = cleaned.toLowerCase();
+        const knownMerchants = [
+            { pattern: /\b(?:amazon|amzn|amazn)\b/, name: 'Amazon' },
+            { pattern: /\b(?:whole foods|wholefds|wfm)\b/, name: 'Whole Foods' },
+            { pattern: /\btrader\s+joe'?s?\b/, name: "Trader Joe's" },
+            { pattern: /\b(?:uber\s*eats|ubereats)\b/, name: 'Uber Eats' },
+            { pattern: /\buber\b/, name: 'Uber' },
+            { pattern: /\b(?:door\s*dash|doordash)\b/, name: 'DoorDash' },
+            { pattern: /\bpaypal\b/, name: 'PayPal' },
+            { pattern: /\bapple(?:\.com| services| store| cash)?\b/, name: 'Apple' },
+            { pattern: /\bstarbucks?\b|\bstarbcks\b/, name: 'Starbucks' },
+            { pattern: /\btarget\b/, name: 'Target' },
+            { pattern: /\bwalmart\b|\bwal-mart\b/, name: 'Walmart' },
+            { pattern: /\bcostco\b/, name: 'Costco' },
+            { pattern: /\bcvs\b/, name: 'CVS' },
+            { pattern: /\bwalgreens\b/, name: 'Walgreens' },
+            { pattern: /\bmcdonald'?s?\b/, name: "McDonald's" },
+            { pattern: /\bnetflix\b/, name: 'Netflix' },
+            { pattern: /\bspotify\b/, name: 'Spotify' },
+            { pattern: /\bvenmo\b/, name: 'Venmo' },
+            { pattern: /\bzelle\b/, name: 'Zelle' },
+            { pattern: /\bopenai\b/, name: 'OpenAI' },
+            { pattern: /\bdropbox\b/, name: 'Dropbox' }
+        ];
+
+        const merchant = knownMerchants.find(item => item.pattern.test(lower));
+        if (merchant) return merchant.name;
+
+        return this.toReadableMerchantName(cleaned);
+    }
+
+    static toReadableMerchantName(name) {
+        const value = String(name || '').replace(/\s+/g, ' ').trim();
+        if (!value) return '';
+
+        const hasLowercase = /[a-z]/.test(value);
+        const readable = hasLowercase
+            ? value
+            : value.toLowerCase().replace(/\b[a-z]/g, char => char.toUpperCase());
+
+        return readable
+            .replace(/\bAt&T\b/g, 'AT&T')
+            .replace(/\bH&M\b/g, 'H&M')
+            .replace(/\bCvs\b/g, 'CVS')
+            .replace(/\bUsps\b/g, 'USPS')
+            .replace(/\bTj\b/g, 'TJ')
+            .replace(/\bIkea\b/g, 'IKEA');
+    }
+
+    static mergeDateContexts(baseContext, incomingContext) {
+        if (!baseContext) return incomingContext || null;
+        if (!incomingContext) return baseContext;
+
+        return {
+            defaultYear: baseContext.defaultYear || incomingContext.defaultYear || null,
+            statementEndDate: baseContext.statementEndDate || incomingContext.statementEndDate || null
+        };
+    }
+
+    static buildDateContextFromLines(lines, initialDate = '') {
+        const yearCounts = new Map();
+        let statementEndDate = null;
+
+        const addDate = isoDate => {
+            if (!isoDate) return;
+            const date = new Date(`${isoDate}T00:00:00`);
+            if (Number.isNaN(date.getTime())) return;
+
+            const year = date.getFullYear();
+            const currentYear = new Date().getFullYear();
+            if (year < currentYear - 15 || year > currentYear + 2) return;
+
+            yearCounts.set(year, (yearCounts.get(year) || 0) + 1);
+            if (!statementEndDate || date > statementEndDate) {
+                statementEndDate = date;
+            }
+        };
+
+        addDate(/^\d{4}-\d{2}-\d{2}$/.test(initialDate) ? initialDate : '');
+
+        const text = (lines || []).join(' ');
+        const datePatterns = [
+            /\b\d{4}[\/-]\d{1,2}[\/-]\d{1,2}\b/g,
+            /\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b/g,
+            /\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{1,2},?\s+\d{2,4}\b/gi
+        ];
+
+        datePatterns.forEach(pattern => {
+            const matches = text.match(pattern) || [];
+            matches.forEach(match => addDate(this.normalizeDate(match, null)));
+        });
+
+        let defaultYear = null;
+        [...yearCounts.entries()].forEach(([year, count]) => {
+            if (!defaultYear || count > (yearCounts.get(defaultYear) || 0)) {
+                defaultYear = year;
+            }
+        });
+
+        return {
+            defaultYear,
+            statementEndDate
+        };
+    }
+
+    static normalizeDate(input, dateContext = null) {
         if (!input) return '';
 
-        const currentYear = new Date().getFullYear();
-        let value = input.replace(/-/g, '/').trim();
-        if (!/\d{4}/.test(value)) {
-            value = value.includes('/') ? `${value}/${currentYear}` : `${value}, ${currentYear}`;
+        const context = typeof dateContext === 'number'
+            ? { defaultYear: dateContext }
+            : dateContext || {};
+        const fallbackYear = context.defaultYear || new Date().getFullYear();
+        const value = String(input)
+            .replace(/\./g, '')
+            .replace(/-/g, '/')
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        let match = value.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
+        if (match) {
+            return this.formatNormalizedDate(Number(match[1]), Number(match[2]), Number(match[3]), context, true);
         }
 
-        const parsed = new Date(value);
-        if (Number.isNaN(parsed.getTime())) return '';
+        match = value.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
+        if (match) {
+            const explicitYear = Boolean(match[3]);
+            const year = explicitYear ? this.normalizeDateYear(match[3]) : fallbackYear;
+            return this.formatNormalizedDate(year, Number(match[1]), Number(match[2]), context, explicitYear);
+        }
 
-        const month = String(parsed.getMonth() + 1).padStart(2, '0');
-        const day = String(parsed.getDate()).padStart(2, '0');
-        return `${parsed.getFullYear()}-${month}-${day}`;
+        match = value.match(/^(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2})(?:,?\s+(\d{2,4}))?$/i);
+        if (match) {
+            const explicitYear = Boolean(match[3]);
+            const year = explicitYear ? this.normalizeDateYear(match[3]) : fallbackYear;
+            return this.formatNormalizedDate(year, this.monthNameToNumber(match[1]), Number(match[2]), context, explicitYear);
+        }
+
+        return '';
+    }
+
+    static normalizeDateYear(yearText) {
+        const year = Number(yearText);
+        if (!Number.isFinite(year)) return new Date().getFullYear();
+        if (year < 100) return year >= 70 ? 1900 + year : 2000 + year;
+        return year;
+    }
+
+    static monthNameToNumber(monthName) {
+        const key = String(monthName || '').slice(0, 3).toLowerCase();
+        return {
+            jan: 1,
+            feb: 2,
+            mar: 3,
+            apr: 4,
+            may: 5,
+            jun: 6,
+            jul: 7,
+            aug: 8,
+            sep: 9,
+            oct: 10,
+            nov: 11,
+            dec: 12
+        }[key] || 0;
+    }
+
+    static formatNormalizedDate(year, month, day, dateContext = null, explicitYear = false) {
+        if (!year || !month || !day) return '';
+
+        let parsed = new Date(year, month - 1, day);
+        if (
+            Number.isNaN(parsed.getTime()) ||
+            parsed.getFullYear() !== year ||
+            parsed.getMonth() !== month - 1 ||
+            parsed.getDate() !== day
+        ) {
+            return '';
+        }
+
+        if (!explicitYear && dateContext && dateContext.statementEndDate instanceof Date) {
+            parsed = this.adjustImplicitYearDate(parsed, dateContext.statementEndDate);
+        }
+
+        const normalizedMonth = String(parsed.getMonth() + 1).padStart(2, '0');
+        const normalizedDay = String(parsed.getDate()).padStart(2, '0');
+        return `${parsed.getFullYear()}-${normalizedMonth}-${normalizedDay}`;
+    }
+
+    static adjustImplicitYearDate(date, statementEndDate) {
+        const dayMs = 24 * 60 * 60 * 1000;
+        const gapDays = (date.getTime() - statementEndDate.getTime()) / dayMs;
+
+        if (gapDays > 45) {
+            return new Date(date.getFullYear() - 1, date.getMonth(), date.getDate());
+        }
+
+        if (gapDays < -370) {
+            return new Date(date.getFullYear() + 1, date.getMonth(), date.getDate());
+        }
+
+        return date;
     }
 
     static amountTokenRegex() {
@@ -1398,7 +1902,9 @@ class Scanner {
     }
 
     static async runOcrDataOnCanvas(canvas, progressCallback) {
-        const result = await Tesseract.recognize(canvas, 'eng', {
+        const TesseractApi = await this.ensureTesseract();
+        const result = await TesseractApi.recognize(canvas, 'eng', {
+            ...this.getTesseractOptions(),
             logger: message => {
                 if (message.status === 'recognizing text' && progressCallback) {
                     progressCallback(Math.round(message.progress * 100));

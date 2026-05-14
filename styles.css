@@ -540,6 +540,15 @@ input[type="date"] {
   cursor: pointer;
 }
 
+.disabled-drop-zone {
+  opacity: 0.62;
+  cursor: not-allowed;
+}
+
+.disabled-drop-zone input {
+  pointer-events: none;
+}
+
 textarea,
 .form-input,
 select {
@@ -615,6 +624,20 @@ select:focus {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.preview-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.skip-duplicate-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-soft);
+  font-size: 0.92rem;
 }
 
 .duplicate-pill {

@@ -2,10 +2,18 @@ class StorageService {
     static STORAGE_KEY = 'privacy_budget_txs';
 
     static getTransactions() {
-        const data = localStorage.getItem(this.STORAGE_KEY);
+        const data = SpendletStorage.getItem(this.STORAGE_KEY);
         if (!data) return [];
 
-        const txs = JSON.parse(data).map(tx => this.normalizeTransaction(tx));
+        let parsed = [];
+        try {
+            parsed = JSON.parse(data);
+        } catch (error) {
+            console.warn('Saved transactions could not be read. Starting with an empty list.', error);
+            parsed = [];
+        }
+
+        const txs = (Array.isArray(parsed) ? parsed : []).map(tx => this.normalizeTransaction(tx));
         return txs.sort((a, b) => new Date(b.date) - new Date(a.date));
     }
 
@@ -77,7 +85,7 @@ class StorageService {
 
     static replaceTransactions(transactions) {
         const normalized = transactions.map(tx => this.normalizeTransaction(tx));
-        localStorage.setItem(this.STORAGE_KEY, JSON.stringify(normalized));
+        SpendletStorage.setItem(this.STORAGE_KEY, JSON.stringify(normalized));
     }
 
     static deleteTransaction(id) {
@@ -86,7 +94,7 @@ class StorageService {
     }
 
     static clearAll() {
-        localStorage.removeItem(this.STORAGE_KEY);
+        SpendletStorage.removeItem(this.STORAGE_KEY);
     }
 
     static generateId() {

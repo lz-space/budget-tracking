@@ -7,6 +7,7 @@ let transactionCategoryFilter = null;
 const PIE_COLORS = ['#d67b44', '#2d7a53', '#5d8db8', '#b2574f', '#8c6db4', '#d1a84a', '#72825e', '#d98080'];
 const BACKUP_VERSION = 1;
 const BACKUP_KDF_ITERATIONS = 250000;
+const LOCAL_APP_URL = 'http://127.0.0.1:8013/';
 
 document.addEventListener('DOMContentLoaded', () => {
     initApp();
@@ -120,8 +121,21 @@ function setupImportListeners() {
     const fileInput = document.getElementById('file-input');
     const statusMsg = document.getElementById('ocr-status');
     const helpBox = document.getElementById('ocr-help');
+    const isFilePage = window.location.protocol === 'file:';
+
+    if (isFilePage) {
+        showLocalServerHelp(helpBox);
+        fileInput.disabled = true;
+        fileInput.closest('.file-drop-zone').classList.add('disabled-drop-zone');
+    }
 
     fileInput.addEventListener('change', async () => {
+        if (isFilePage) {
+            showLocalServerHelp(helpBox);
+            fileInput.value = '';
+            return;
+        }
+
         helpBox.classList.add('hidden');
         helpBox.textContent = '';
         statusMsg.classList.remove('hidden');
@@ -136,13 +150,13 @@ function setupImportListeners() {
         }
         
         statusMsg.classList.add('hidden');
-        if (transactions.length === 0) {
-            helpBox.textContent = buildMobileScanHelp();
-            helpBox.classList.remove('hidden');
-        } else if (transactions.error) {
+        if (transactions.error) {
             helpBox.textContent = transactions.error;
             helpBox.classList.remove('hidden');
             return;
+        } else if (transactions.length === 0) {
+            helpBox.textContent = buildMobileScanHelp();
+            helpBox.classList.remove('hidden');
         }
         showPreview(transactions);
         fileInput.value = '';
@@ -157,7 +171,7 @@ function setupImportListeners() {
         const rows = document.querySelectorAll('.editable-tx-row');
         let hasMissingFields = false;
 
-        const reviewedTransactions = Array.from(rows).map(row => {
+        const reviewedRows = Array.from(rows).map(row => {
             const index = Number(row.dataset.index);
             const dateInput = row.querySelector('.tx-edit-date');
             if (!dateInput.value) {
@@ -166,7 +180,12 @@ function setupImportListeners() {
             } else {
                 dateInput.style.border = '';
             }
-            return buildTransactionFromRow(row, pendingTransactions[index] || {});
+            const skipToggle = row.querySelector('.tx-skip-duplicate');
+            return {
+                transaction: buildTransactionFromRow(row, pendingTransactions[index] || {}),
+                skipDuplicate: Boolean(skipToggle && skipToggle.checked),
+                duplicateOverride: Boolean(skipToggle && !skipToggle.checked)
+            };
         });
 
         if (hasMissingFields) {
@@ -174,10 +193,18 @@ function setupImportListeners() {
             return;
         }
 
-        StorageService.saveMultipleTransactions(reviewedTransactions);
+        const savePlan = planTransactionsForImportSave(reviewedRows);
+        if (savePlan.transactionsToSave.length > 0) {
+            StorageService.saveMultipleTransactions(savePlan.transactionsToSave);
+        }
+
         pendingTransactions = [];
         document.getElementById('import-preview-area').classList.add('hidden');
         document.querySelector('[data-target="overview"]').click();
+
+        if (savePlan.skippedDuplicates.length > 0) {
+            alert(`${savePlan.transactionsToSave.length} new transaction${savePlan.transactionsToSave.length === 1 ? '' : 's'} saved. ${savePlan.skippedDuplicates.length} likely duplicate${savePlan.skippedDuplicates.length === 1 ? '' : 's'} skipped.`);
+        }
     });
 
     document.getElementById('preview-list').addEventListener('click', event => {
@@ -197,6 +224,17 @@ function setupImportListeners() {
 
         showPreview(pendingTransactions);
     });
+}
+
+function showLocalServerHelp(helpBox) {
+    helpBox.textContent = '';
+    const message = document.createElement('span');
+    message.textContent = 'This page is open as file://, so the browser blocks PDF and OCR scanning. Open the local web app instead: ';
+    const link = document.createElement('a');
+    link.href = LOCAL_APP_URL;
+    link.textContent = LOCAL_APP_URL;
+    helpBox.append(message, link);
+    helpBox.classList.remove('hidden');
 }
 
 function setupManualEntry() {
@@ -387,6 +425,9 @@ function showPreview(transactions) {
     transactions.forEach((transaction, index) => {
         const hint = duplicateHints[index];
         const scanHint = buildScanReviewHint(transaction);
+        const skipDuplicateControl = hint && hint.defaultSkip
+            ? `<label class="skip-duplicate-toggle"><input type="checkbox" class="tx-skip-duplicate" checked> Skip duplicate</label>`
+            : '';
         const row = document.createElement('div');
         row.className = 'editable-tx-row';
         row.dataset.index = String(index);
@@ -396,7 +437,10 @@ function showPreview(transactions) {
                     ${scanHint ? `<span class="duplicate-pill ${scanHint.level}">${escapeHtml(scanHint.label)}</span>` : ''}
                     ${hint ? `<span class="duplicate-pill ${hint.level}">${escapeHtml(hint.label)}</span>` : ''}
                 </div>
-                <button class="btn danger mini-btn remove-preview-btn" type="button" data-index="${index}">Remove</button>
+                <div class="preview-row-actions">
+                    ${skipDuplicateControl}
+                    <button class="btn danger mini-btn remove-preview-btn" type="button" data-index="${index}">Remove</button>
+                </div>
             </div>
             <div class="inline-row">
                 <input type="date" value="${transaction.date}" class="form-input tx-edit-date">
@@ -485,60 +529,229 @@ function refreshPendingPreviewCategories() {
     });
 }
 
+const DUPLICATE_WARN_SCORE = 0.68;
+const DUPLICATE_SKIP_SCORE = 0.86;
+const DUPLICATE_DATE_WINDOW_DAYS = 3;
+const DUPLICATE_STOP_WORDS = new Set([
+    'ach', 'auth', 'authorized', 'card', 'checkcard', 'co', 'company', 'corp', 'credit',
+    'debit', 'dbt', 'hold', 'inc', 'llc', 'ltd', 'market', 'marketplace', 'mktp',
+    'mobile', 'online', 'pay', 'payment', 'pending', 'pos', 'posted', 'purchase',
+    'recurring', 'sq', 'store', 'terminal', 'transaction', 'tst', 'us', 'usa', 'visa',
+    'withdrawal', 'www', 'com', 'net', 'org', 'help',
+    'al', 'ak', 'az', 'ar', 'ca', 'co', 'ct', 'dc', 'de', 'fl', 'ga', 'hi', 'ia', 'id',
+    'il', 'in', 'ks', 'ky', 'la', 'ma', 'md', 'me', 'mi', 'mn', 'mo', 'ms', 'mt', 'nc',
+    'nd', 'ne', 'nh', 'nj', 'nm', 'nv', 'ny', 'oh', 'ok', 'or', 'pa', 'ri', 'sc', 'sd',
+    'tn', 'tx', 'ut', 'va', 'vt', 'wa', 'wi', 'wv', 'wy'
+]);
+
 function detectDuplicateWarnings(transactions) {
-    const savedTransactions = StorageService.getTransactions();
+    const savedEntries = StorageService.getTransactions().map(transaction => ({
+        transaction,
+        source: 'saved'
+    }));
+    const scannedEntries = [];
     const warnings = {};
 
     transactions.forEach((transaction, index) => {
-        const normalizedName = normalizeDuplicateName(transaction.name);
-        const intraMatch = transactions.find((other, otherIndex) => {
-            if (index === otherIndex) return false;
-            return isPotentialDuplicate(transaction, normalizedName, other, normalizeDuplicateName(other.name));
-        });
+        const match = findBestDuplicateMatch(transaction, savedEntries.concat(scannedEntries));
 
-        if (intraMatch) {
-            warnings[index] = {
-                level: 'strong',
-                label: 'Possible duplicate',
-                message: `This looks very close to another scanned row: ${intraMatch.name} for $${intraMatch.amount.toFixed(2)} on ${intraMatch.date}. Remove one if they are the same purchase.`
-            };
-            return;
+        if (match) {
+            warnings[index] = buildDuplicateWarning(match);
         }
 
-        const savedMatch = savedTransactions.find(saved => {
-            return isPotentialDuplicate(transaction, normalizedName, saved, normalizeDuplicateName(saved.name));
+        scannedEntries.push({
+            transaction,
+            source: 'scan'
         });
-
-        if (savedMatch) {
-            warnings[index] = {
-                level: 'soft',
-                label: 'Already saved?',
-                message: `A similar saved transaction already exists: ${savedMatch.name} for $${savedMatch.amount.toFixed(2)} on ${savedMatch.date}.`
-            };
-        }
     });
 
     return warnings;
 }
 
-function isPotentialDuplicate(left, leftName, right, rightName) {
-    if (left.type !== right.type) return false;
+function planTransactionsForImportSave(reviewedRows) {
+    const savedEntries = StorageService.getTransactions().map(transaction => ({
+        transaction,
+        source: 'saved'
+    }));
+    const acceptedEntries = [];
+    const transactionsToSave = [];
+    const skippedDuplicates = [];
 
-    const sameAmount = Math.abs((left.amount || 0) - (right.amount || 0)) < 0.01;
-    const closeDate = Math.abs(new Date(left.date).getTime() - new Date(right.date).getTime()) <= 2 * 24 * 60 * 60 * 1000;
-    const strongNameMatch = leftName && rightName && (leftName === rightName || leftName.includes(rightName) || rightName.includes(leftName));
-    const looseNameMatch = leftName && rightName && levenshteinDistance(leftName, rightName) <= 2;
+    reviewedRows.forEach((row, index) => {
+        const transaction = row.transaction;
+        if (row.skipDuplicate) {
+            skippedDuplicates.push({ index, transaction, reason: 'checked' });
+            return;
+        }
 
-    return sameAmount && closeDate && (strongNameMatch || looseNameMatch);
+        const match = row.duplicateOverride
+            ? null
+            : findBestDuplicateMatch(transaction, savedEntries.concat(acceptedEntries));
+
+        if (match && match.shouldSkip) {
+            skippedDuplicates.push({ index, transaction, reason: 'matched', match });
+            return;
+        }
+
+        transactionsToSave.push(transaction);
+        acceptedEntries.push({
+            transaction,
+            source: 'scan'
+        });
+    });
+
+    return {
+        transactionsToSave,
+        skippedDuplicates
+    };
+}
+
+function buildDuplicateWarning(match) {
+    const transaction = match.transaction;
+    const sourceLabel = match.source === 'scan' ? 'another scanned row' : 'a saved transaction';
+    const amount = Number(transaction.amount || 0).toFixed(2);
+    const confidence = Math.round(match.score * 100);
+
+    return {
+        level: match.shouldSkip ? 'strong' : 'soft',
+        label: match.shouldSkip ? 'Will skip duplicate' : 'Possible duplicate',
+        defaultSkip: match.shouldSkip,
+        message: `${match.shouldSkip ? 'Strong match' : 'Similar match'} to ${sourceLabel}: ${transaction.name} for $${amount} on ${transaction.date}. Match confidence ${confidence}%.`
+    };
+}
+
+function findBestDuplicateMatch(transaction, candidateEntries) {
+    const left = buildDuplicateFingerprint(transaction);
+    let bestMatch = null;
+
+    candidateEntries.forEach(entry => {
+        const candidate = entry.transaction || entry;
+        const right = buildDuplicateFingerprint(candidate);
+        const score = scoreDuplicateMatch(left, right);
+
+        if (score < DUPLICATE_WARN_SCORE) return;
+        if (!bestMatch || score > bestMatch.score) {
+            bestMatch = {
+                transaction: candidate,
+                source: entry.source || 'saved',
+                score,
+                shouldSkip: score >= DUPLICATE_SKIP_SCORE
+            };
+        }
+    });
+
+    return bestMatch;
+}
+
+function buildDuplicateFingerprint(transaction) {
+    const normalizedName = normalizeDuplicateName(transaction.name);
+    const tokens = normalizedName.split(' ').filter(Boolean);
+
+    return {
+        amountCents: Math.round((Number(transaction.amount) || 0) * 100),
+        compactName: normalizedName.replace(/\s+/g, ''),
+        dateTime: parseDuplicateDate(transaction.date),
+        normalizedName,
+        tokenSet: new Set(tokens),
+        tokens,
+        type: transaction.type || ''
+    };
+}
+
+function scoreDuplicateMatch(left, right) {
+    if (!left.amountCents || left.amountCents !== right.amountCents) return 0;
+
+    const dateGap = Math.abs(left.dateTime - right.dateTime) / (24 * 60 * 60 * 1000);
+    if (!Number.isFinite(dateGap) || dateGap > DUPLICATE_DATE_WINDOW_DAYS) return 0;
+
+    const nameScore = duplicateNameScore(left, right);
+    if (nameScore < 0.58) return 0;
+
+    const dateScore = 1 - (dateGap / DUPLICATE_DATE_WINDOW_DAYS) * 0.18;
+    const typeScore = left.type && right.type && left.type !== right.type ? 0.88 : 1;
+
+    return (nameScore * 0.78) + (dateScore * 0.14) + (typeScore * 0.08);
+}
+
+function duplicateNameScore(left, right) {
+    if (!left.compactName || !right.compactName) return 0;
+    if (left.compactName === right.compactName) return 1;
+
+    const shorter = left.compactName.length <= right.compactName.length ? left.compactName : right.compactName;
+    const longer = left.compactName.length > right.compactName.length ? left.compactName : right.compactName;
+    const containsScore = shorter.length >= 4 && longer.includes(shorter)
+        ? Math.min(0.96, 0.82 + (shorter.length / longer.length) * 0.14)
+        : 0;
+
+    const intersectionSize = countTokenIntersection(left.tokenSet, right.tokenSet);
+    const minTokenCount = Math.min(left.tokenSet.size, right.tokenSet.size) || 1;
+    const totalTokenCount = (left.tokenSet.size + right.tokenSet.size) || 1;
+    const tokenContainment = intersectionSize / minTokenCount;
+    const tokenDice = (2 * intersectionSize) / totalTokenCount;
+    const tokenScore = Math.max(tokenContainment * 0.92, tokenDice);
+
+    const editScore = 1 - (levenshteinDistance(left.compactName, right.compactName) / Math.max(left.compactName.length, right.compactName.length));
+    const sharedLongTokenScore = hasSharedLongToken(left.tokenSet, right.tokenSet) ? 0.72 : 0;
+
+    return Math.max(containsScore, tokenScore, editScore, sharedLongTokenScore);
+}
+
+function countTokenIntersection(leftSet, rightSet) {
+    let count = 0;
+    leftSet.forEach(token => {
+        if (rightSet.has(token)) count += 1;
+    });
+    return count;
+}
+
+function hasSharedLongToken(leftSet, rightSet) {
+    let shared = false;
+    leftSet.forEach(token => {
+        if (token.length >= 6 && rightSet.has(token)) shared = true;
+    });
+    return shared;
+}
+
+function parseDuplicateDate(dateValue) {
+    const value = String(dateValue || '').trim();
+    if (!value) return NaN;
+
+    const isoDate = /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T00:00:00` : value;
+    const time = new Date(isoDate).getTime();
+    return Number.isFinite(time) ? time : NaN;
 }
 
 function normalizeDuplicateName(name) {
-    return String(name || '')
+    const refinedName = window.Scanner && typeof Scanner.refineMerchantName === 'function'
+        ? Scanner.refineMerchantName(name)
+        : name;
+    let normalized = String(refinedName || name || '')
         .toLowerCase()
-        .replace(/[^a-z0-9\s]/g, ' ')
-        .replace(/\b(inc|llc|co|corp|payment|purchase|debit|credit)\b/g, ' ')
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/&/g, ' and ')
+        .replace(/\bamazn\b|\bamzn\b/g, ' amazon ')
+        .replace(/\bamazon\s*(mkt|mktp|marketplace|prime|digital)\b/g, ' amazon ')
+        .replace(/\bwholefds\b|\bwfm\b/g, ' whole foods ')
+        .replace(/\buber\s*(trip|eats)?\b|\bubereats\b/g, ' uber ')
+        .replace(/\bdoor\s*dash\b|\bdoordash\b/g, ' door dash ')
+        .replace(/\bmcdonalds\b/g, ' mcdonald ')
+        .replace(/\bstarbcks\b/g, ' starbucks ')
+        .replace(/\bpay\s*pal\b/g, ' paypal ')
+        .replace(/\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?\b/g, ' ')
+        .replace(/\b\d{4}[\/-]\d{1,2}[\/-]\d{1,2}\b/g, ' ')
+        .replace(/\b[0-9a-f]{6,}\b/g, ' ')
+        .replace(/\d+/g, ' ')
+        .replace(/[^a-z\s]/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
+
+    const tokens = normalized
+        .split(' ')
+        .filter(token => token.length > 1 && !DUPLICATE_STOP_WORDS.has(token));
+
+    normalized = tokens.join(' ').trim();
+    return normalized || String(name || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 function levenshteinDistance(left, right) {
